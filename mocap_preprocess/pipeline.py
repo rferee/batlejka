@@ -1,0 +1,231 @@
+"""Session pipeline steps that are not their own module: scan (§6.1),
+the fps check, process (§6.2) and proxies (§6.4)."""
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from fractions import Fraction
+from pathlib import Path
+
+from . import config
+from . import ffmpeg_tools as ff
+from .jobs import Job
+from .session_store import SessionStore, file_id, now
+
+
+# ---------------------------------------------------------------------------
+# scan
+
+def list_source_files(source: Path) -> list[dict]:
+    out = []
+    if not source.is_dir():
+        return out
+    for root, dirs, files in os.walk(source):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for fn in sorted(files):
+            if fn.startswith(".") or os.path.splitext(fn)[1].lower() not in config.VIDEO_EXTS:
+                continue
+            full = Path(root) / fn
+            try:
+                st = full.stat()
+            except OSError:
+                continue
+            rel = full.relative_to(source).as_posix()
+            out.append({"rel": rel, "path": full, "size": st.st_size, "mtime": round(st.st_mtime, 3)})
+    return out
+
+
+def new_file_record(rel: str, size: int, mtime: float) -> dict:
+    return {
+        "id": file_id(rel),
+        "rel": rel,
+        "size": size,
+        "mtime": mtime,
+        "probe": None,
+        "probe_error": None,
+        "assets": {"thumb": False, "features": False, "audio": False, "wave": False, "proxy": False},
+        "camera": None,
+        "offset": None,
+        "sync": {"method": "none"},
+    }
+
+
+def delete_cache(paths, fid: str) -> None:
+    for p in paths.cache_files(fid):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def scan(store: SessionStore, name: str, job: Job | None = None) -> dict:
+    paths = store.paths(name)
+    entries = list_source_files(paths.source)
+    data = store.load(name)
+    known = {f["rel"]: f for f in data["files"]}
+
+    def changed(e):
+        f = known.get(e["rel"])
+        return (f is None or f.get("probe") is None or f.get("size") != e["size"]
+                or abs((f.get("mtime") or 0) - e["mtime"]) > 1e-3)
+
+    todo = [e for e in entries if changed(e)]
+    results: dict[str, tuple[dict | None, str | None]] = {}
+    if job:
+        job.log(f"{len(entries)} video files in source/, {len(todo)} to probe")
+    if todo:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {ex.submit(ff.probe, e["path"]): e for e in todo}
+            for i, fut in enumerate(as_completed(futs), 1):
+                e = futs[fut]
+                try:
+                    results[e["rel"]] = (fut.result(), None)
+                except Exception as exc:  # noqa: BLE001
+                    results[e["rel"]] = (None, str(exc))
+                    if job:
+                        job.log(f"{e['rel']}: probe failed: {exc}", "error")
+                if job:
+                    job.set_progress(i / len(todo), f"probed {i}/{len(todo)}")
+                    if job.cancelled:
+                        for f in futs:
+                            f.cancel()
+                        job.check_cancel()
+
+    added = removed = reprobed = 0
+    with store.edit(name) as data:
+        old = {f["rel"]: f for f in data["files"]}
+        files = []
+        for e in entries:
+            f = old.get(e["rel"])
+            if e["rel"] in results:
+                probe, err = results[e["rel"]]
+                if f is None:
+                    f = new_file_record(e["rel"], e["size"], e["mtime"])
+                    added += 1
+                else:
+                    if f.get("size") != e["size"] or abs((f.get("mtime") or 0) - e["mtime"]) > 1e-3:
+                        delete_cache(paths, f["id"])
+                        f["assets"] = {k: False for k in f["assets"]}
+                    reprobed += 1
+                f.update(size=e["size"], mtime=e["mtime"], probe=probe, probe_error=err)
+            if f is not None:
+                files.append(f)
+        seen = {e["rel"] for e in entries}
+        for rel, f in old.items():
+            if rel not in seen:
+                removed += 1
+                delete_cache(paths, f["id"])
+        data["files"] = files
+        used = {f.get("camera") for f in files}
+        if removed:
+            data["cameras"] = [c for c in data["cameras"] if c["id"] in used]
+        prefill_target_fps(data)
+        data["state"]["scanned_at"] = now()
+    summary = {"files": len(entries), "added": added, "removed": removed, "reprobed": reprobed}
+    if job:
+        job.log(f"scan done: {summary}")
+    return summary
+
+
+def video_files(data: dict) -> list[dict]:
+    return [f for f in data["files"] if f.get("probe") and f["probe"].get("video")]
+
+
+def prefill_target_fps(data: dict) -> None:
+    """Most common nominal fps weighted by total duration (unless user-set)."""
+    s = data["settings"]
+    if s.get("target_fps_user_set"):
+        return
+    weight: dict[str, float] = defaultdict(float)
+    for f in video_files(data):
+        nom = f["probe"]["video"].get("nominal_fps")
+        if nom:
+            weight[nom] += max(f["probe"].get("duration") or 0, 0.001)
+    if weight:
+        s["target_fps"] = max(weight.items(), key=lambda kv: kv[1])[0]
+
+
+# ---------------------------------------------------------------------------
+# fps check
+
+def _drift_note(nominal: str, target: str) -> str:
+    fn, ft = ff.fps_float(nominal), ff.fps_float(target)
+    if not fn or not ft:
+        return ""
+    ratio = fn / ft
+    k = round(ratio) if ratio >= 1 else 1 / round(1 / ratio)
+    mult = "" if k == 1 else (f" ({round(k)}×)" if k > 1 else f" (1/{round(1 / k)})")
+    residual = abs(ratio / k - 1)
+    drift = residual * 60 * ft
+    if residual > 0.02:
+        return f"{ff.fps_label(nominal)} vs {ff.fps_label(target)} → frames duplicated/dropped unevenly"
+    if drift < 0.05:
+        return f"{ff.fps_label(nominal)} vs {ff.fps_label(target)}{mult} → frames dropped/duplicated evenly"
+    return (f"{ff.fps_label(nominal)} vs {ff.fps_label(target)}{mult} → ~{drift:.1f} frames of drift "
+            f"per minute at {ff.fps_label(target)} fps")
+
+
+def fps_check(data: dict) -> dict:
+    target = data["settings"]["target_fps"]
+    items = []
+    files = data["files"]
+    no_video = [f for f in files if f.get("probe") is not None and not f["probe"].get("video")]
+    failed = [f for f in files if f.get("probe") is None]
+    vids = video_files(data)
+
+    if failed:
+        items.append({"level": "error", "title": f"{len(failed)} file(s) could not be probed",
+                      "detail": "ffprobe failed — see the scan log", "files": [f["id"] for f in failed]})
+    if no_video:
+        items.append({"level": "error", "title": f"{len(no_video)} file(s) without a video stream",
+                      "detail": "ignored", "files": [f["id"] for f in no_video]})
+
+    by_rate: dict[str, list] = defaultdict(list)
+    for f in vids:
+        nom = f["probe"]["video"].get("nominal_fps")
+        if nom != target:
+            by_rate[nom or "?"].append(f)
+    for nom, fs in sorted(by_rate.items()):
+        items.append({"level": "warn",
+                      "title": f"{len(fs)} file(s) at {ff.fps_label(nom)} fps instead of {ff.fps_label(target)}",
+                      "detail": _drift_note(nom, target) + " — conformed on export",
+                      "files": [f["id"] for f in fs]})
+
+    vfr = [f for f in vids if f["probe"]["video"].get("vfr_suspect")]
+    if vfr:
+        items.append({"level": "warn", "title": f"{len(vfr)} file(s) look variable-frame-rate",
+                      "detail": "will be conformed to constant fps on export",
+                      "files": [f["id"] for f in vfr]})
+
+    no_audio = [f for f in vids if not f["probe"].get("audio")]
+    if no_audio:
+        items.append({"level": "warn", "title": f"{len(no_audio)} file(s) without audio",
+                      "detail": "can't be audio-synced; will be placed by metadata, check manually",
+                      "files": [f["id"] for f in no_audio]})
+
+    n_ok = sum(1 for f in vids if f["probe"]["video"].get("nominal_fps") == target)
+    level = "ok"
+    if any(i["level"] == "error" for i in items):
+        level = "error"
+    elif items:
+        level = "warn"
+    if not vids:
+        summary = "no video files yet"
+    elif level == "ok":
+        summary = f"all {len(vids)} files at {ff.fps_label(target)} fps"
+    else:
+        summary = f"{n_ok} ok · {len(vids) - n_ok} off-target"
+    return {"level": level, "summary": summary, "target": target, "target_label": ff.fps_label(target),
+            "n_ok": n_ok, "n_video": len(vids), "items": items}
+
+
+def standard_rates() -> list[dict]:
+    return [{"value": r, "label": ff.fps_label(r)} for r in config.STANDARD_FPS]
+
+
+def fraction_ok(value: str) -> bool:
+    try:
+        return Fraction(value) > 0
+    except (ValueError, ZeroDivisionError):
+        return False
