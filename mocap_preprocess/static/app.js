@@ -1798,12 +1798,12 @@ const ReviewScreen = {
       h('span', { class: 'section-title' }, 'Output'),
       h('div', { class: 'col', style: { gap: '6px', fontSize: '11px', color: 'var(--fg-2)' } }, 'Encoder',
         seg('encoder', ['libx264', 'h264_nvenc']),
-        h('span', { class: 'note' }, `h264 · ${q} · yuv420p · ${fpsLabel(fps)} fps · ${o.long_side ? `${o.long_side}px long side` : 'source size'}`)),
+        o.encoder === 'h264_nvenc' ? seg('nvenc_preset', ['p5', 'p4', 'p3'], (v) => ({ p5: 'p5 quality', p4: 'p4', p3: 'p3 fast' })[v]) : null,
+        h('span', { class: 'note' }, `h264 · ${q} · yuv420p · ${fpsLabel(fps)} fps · ${o.long_side ? `${o.long_side}px long side` : 'source size'}`
+          + (o.encoder === 'h264_nvenc' ? ' · NVENC is usually the bottleneck: p3 is about twice as fast as p5 at 4K, slightly bigger files' : ''))),
       h('div', { class: 'col', style: { gap: '6px', fontSize: '11px', color: 'var(--fg-2)' } }, 'Files at once',
         seg('parallel', [1, 2, 3]),
-        h('span', { class: 'note' }, (o.parallel || 1) > 1
-          ? `${o.parallel} ffmpegs side by side — faster when decoding is the bottleneck (NVENC, 4K/HEVC sources); with libx264 one already uses every core`
-          : 'one file after another; 2–3 can be faster with NVENC or 4K/HEVC sources')),
+        h('span', { class: 'note' }, 'only helps if the encoder isn\'t already saturated: a GPU with one NVENC (e.g. RTX 3090) still encodes one file at a time, and libx264 already uses every core')),
       h('button', { class: 'adv-toggle', onclick: () => { RV.advOpen = !RV.advOpen; this.renderSide(); } },
         icon(RV.advOpen ? 'chevron-down' : 'chevron-right'), 'Advanced'),
       RV.advOpen ? h('div', { class: 'col' },

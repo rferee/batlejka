@@ -22,6 +22,7 @@ from .session_store import SessionStore, now, sanitize_filename, write_json_atom
 
 ROTATE = {90: "transpose=1", 180: "transpose=1,transpose=1", 270: "transpose=2"}
 MAX_PARALLEL = 3
+NVENC_PRESETS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
 
 
 @dataclass
@@ -38,13 +39,15 @@ class CamPlan:
     notes: list = field(default_factory=list)
 
 
-def scale_filter(long_side) -> str:
-    """Downscale-only fit of the long side; dimensions kept even for yuv420p."""
+def scale_filter(long_side, cuda: bool = False) -> str:
+    """Downscale-only fit of the long side; dimensions kept even for yuv420p.
+    ``cuda``: the same on the GPU, also converting to 8-bit nv12 there."""
     if not long_side:
-        return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    L = int(long_side)
-    return (f"scale=w='if(gte(iw,ih),min({L},trunc(iw/2)*2),-2)'"
-            f":h='if(gte(iw,ih),-2,min({L},trunc(ih/2)*2))'")
+        dims = "w=trunc(iw/2)*2:h=trunc(ih/2)*2"
+    else:
+        L = int(long_side)
+        dims = f"w='if(gte(iw,ih),min({L},trunc(iw/2)*2),-2)':h='if(gte(iw,ih),-2,min({L},trunc(ih/2)*2))'"
+    return f"scale_cuda={dims}:format=nv12" if cuda else f"scale={dims}"
 
 
 def target_fraction(data: dict) -> Fraction:
@@ -99,27 +102,45 @@ def plan_take(data: dict, take: dict, camera_ids: list[str]) -> tuple[list[CamPl
 def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: int, options: dict,
                   hwaccel: bool) -> list:
     fps_s = ff.frac_str(fps)
+    nvenc = options.get("encoder") == "h264_nvenc"
+    margin = max(1.0 / float(fps), 0.25)    # pad past the end; -frames:v caps the count
     args: list = ["ffmpeg", "-y", "-v", "error"]
     if hwaccel:
-        args += ["-hwaccel", "cuda"]
+        # decode, fps and scale/8-bit stay on the GPU; frames only come down to system
+        # memory for what this build can't do there (rotation, black padding) or for libx264
+        args += ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     if plan.seek > 0:
         args += ["-ss", f"{plan.seek:.6f}"]
     args += ["-i", src, "-map", "0:v:0"]
-    vf = []
-    if plan.pre > 0:
-        vf.append(f"tpad=start_duration={plan.pre:.6f}:color=black")
-    vf.append(f"fps={fps_s}:start_time=0")
-    rot = int(plan.camera.get("rotation") or 0)
-    if rot in ROTATE:
-        vf.append(ROTATE[rot])
-    vf.append(scale_filter(options.get("long_side")))
-    # pad whatever the file is missing at the end, plus a margin; -frames:v caps the count
-    vf.append(f"tpad=stop_duration={plan.post + max(1.0 / float(fps), 0.25):.6f}:color=black")
-    vf.append("format=yuv420p")
+    if hwaccel:
+        meta = int((plan.file["probe"].get("video") or {}).get("rotation_meta") or 0)
+        rot = (meta + int(plan.camera.get("rotation") or 0)) % 360
+        vf = [f"fps={fps_s}:start_time=0", scale_filter(options.get("long_side"), cuda=True)]
+        black_end = plan.post > 0.5 / float(fps)
+        # one tpad for both ends: two in a row after fps drop the end padding
+        pad = [f"start_duration={plan.pre:.6f}"] if plan.pre > 0 else []
+        pad += [f"stop_duration={plan.post + margin:.6f}"] if black_end else ["stop_mode=clone", f"stop_duration={margin:.6f}"]
+        if plan.pre > 0 or black_end or rot in ROTATE or not nvenc:
+            vf += ["hwdownload", "format=nv12"] + ([ROTATE[rot]] if rot in ROTATE else []) + ["tpad=" + ":".join(pad + ["color=black"])]
+        else:   # all on the GPU, straight into NVENC (cloning the last frame works on CUDA frames)
+            vf.append(f"tpad=stop_mode=clone:stop_duration={margin:.6f}")
+    else:
+        vf = []
+        if plan.pre > 0:
+            vf.append(f"tpad=start_duration={plan.pre:.6f}:color=black")
+        vf.append(f"fps={fps_s}:start_time=0")
+        rot = int(plan.camera.get("rotation") or 0)
+        if rot in ROTATE:
+            vf.append(ROTATE[rot])
+        vf.append(scale_filter(options.get("long_side")))
+        # pad whatever the file is missing at the end, plus a margin
+        vf.append(f"tpad=stop_duration={plan.post + margin:.6f}:color=black")
+        vf.append("format=yuv420p")
     args += ["-vf", ",".join(vf), "-frames:v", str(n_frames)]
     crf = int(options.get("crf", 17))
-    if options.get("encoder") == "h264_nvenc":
-        args += ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(crf + 2), "-b:v", "0"]
+    if nvenc:
+        args += ["-c:v", "h264_nvenc", "-preset", options.get("nvenc_preset", "p5"), "-rc", "vbr",
+                 "-cq", str(crf + 2), "-b:v", "0"]
     else:
         args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
     if options.get("audio", True) and plan.file["probe"].get("audio"):
@@ -147,6 +168,8 @@ def normalize_options(options: dict, defaults: dict) -> dict:
     o["long_side"] = int(ls) if ls not in (None, "", "keep", 0, "0") else 0
     o["audio"] = bool(o.get("audio", True))
     o["overwrite"] = bool(o.get("overwrite", True))
+    if o.get("nvenc_preset") not in NVENC_PRESETS:
+        o["nvenc_preset"] = "p5"
     try:
         o["parallel"] = max(1, min(MAX_PARALLEL, int(o.get("parallel") or 1)))
     except (TypeError, ValueError):
@@ -182,9 +205,11 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
     total = max(1, sum(len(p) for _, _, p, _ in work))
     parallel = options.get("parallel", 1)
     job.log(f"exporting {len(takes)} take(s) × {len(camera_ids)} camera(s) at {ff.fps_label(fps)} fps "
-            f"({options['encoder']}, {'crf' if options['encoder'] == 'libx264' else 'cq'} "
+            f"({options['encoder']}{' ' + options['nvenc_preset'] if options['encoder'] == 'h264_nvenc' else ''}, "
+            f"{'crf' if options['encoder'] == 'libx264' else 'cq'} "
             f"{options['crf'] + (2 if options['encoder'] == 'h264_nvenc' else 0)}, "
             f"{options['long_side'] or 'source'} long side, layout {options['layout']}"
+            f"{', GPU decode/scale' if hw else ''}"
             f"{f', {parallel} files at once' if parallel > 1 else ''})")
 
     count = {"done": 0, "written": 0, "errors": 0}
@@ -278,7 +303,7 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             "take": tk["name"], "id": tk["id"], "start": tk["start"], "end": tk["end"],
             "duration": n / float(fps), "fps": ff.frac_str(fps), "fps_label": ff.fps_label(fps), "frames": n,
             "layout": options["layout"], "exported_at": now(),
-            "options": {k: options[k] for k in ("encoder", "crf", "long_side", "audio")},
+            "options": {k: options[k] for k in ("encoder", "nvenc_preset", "crf", "long_side", "audio")},
             "cameras": [{
                 "camera_id": p.camera["id"], "name": p.camera["name"],
                 "output": p.out.relative_to(take_dir).as_posix() if p.out else None,

@@ -34,6 +34,7 @@ DEFAULT_EXPORT_OPTIONS = {
     "long_side": 1920,
     "encoder": "libx264",
     "crf": 17,
+    "nvenc_preset": "p5",  # p5 quality … p3 about twice as fast at 4K
     "audio": True,
     "overwrite": True,
     "parallel": 1,        # files encoded at once (2-3 help when decoding is the bottleneck, e.g. NVENC)

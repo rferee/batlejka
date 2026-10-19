@@ -152,3 +152,52 @@ def test_parallel_export_cancels_every_file(exported):
         exporter.export(store, name, job, [t["id"] for t in data["takes"]], [c["id"] for c in data["cameras"]], opts)
     assert time.time() - t0 < 10
     assert not list(store.paths(name).output.rglob("*.tmp.mp4"))   # partial files cleaned up
+
+
+def _gpu_available() -> bool:
+    try:
+        r = subprocess.run([config.ffmpeg_path(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=256x144:d=0.2",
+                            "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True, timeout=30)
+        hw = subprocess.run([config.ffmpeg_path(), "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=30)
+        return r.returncode == 0 and "cuda" in hw.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+@pytest.mark.skipif(not _gpu_available(), reason="needs an NVIDIA GPU (CUDA decode + NVENC)")
+def test_gpu_pipeline_gives_the_same_takes(exported):
+    """GPU decode/scale (+ CPU only for rotation and padding) → NVENC: same frame
+    counts, rotation, flash alignment and padding as the CPU path."""
+    store, name, gt, data, _, _, fuji_cam = exported
+    with store.edit(name) as d:
+        d["settings"]["hwaccel"] = True
+    try:
+        opts = exporter.normalize_options({"layout": "flat", "long_side": 0, "encoder": "h264_nvenc",
+                                           "nvenc_preset": "p3"}, config.DEFAULT_EXPORT_OPTIONS)
+        job = Job("export", name)
+        res = exporter.export(store, name, job, [t["id"] for t in data["takes"]], [c["id"] for c in data["cameras"]], opts)
+        log = [e["msg"] for e in job._log]
+        assert res["errors"] == 0, log
+        assert "GPU decode/scale" in log[0] and not any("retrying on CPU" in m for m in log), log
+        cams = {c["id"]: c["name"] for c in data["cameras"]}
+        for tk, _ in take_dirs(store, name, data):
+            d = store.paths(name).output / exporter.sanitize_filename(tk["name"])
+            n = round((tk["end"] - tk["start"]) * FPS)
+            for c in cams.values():
+                v = d / f"{c}_synced.mp4"
+                assert ff.count_video_frames(v) == n, v
+                info = ff.video_stream_info(v)
+                assert (info["width"], info["height"]) == (360, 640), v   # rotation, incl. the Fuji's metadata
+            if tk["id"] != WIDE["id"]:
+                expected = [round((t - tk["start"]) * FPS) for t in gt["flashes"] if tk["start"] <= t < tk["end"]]
+                for c in cams.values():
+                    got = flash_starts(luminance(d / f"{c}_synced.mp4"))
+                    assert len(got) == len(expected) and all(abs(g - e) <= 1 for g, e in zip(got, expected)), (c, got, expected)
+        info = json.loads((store.paths(name).output / exporter.sanitize_filename(WIDE["name"]) / "take_info.json").read_text())
+        pixel = next(c for c in info["cameras"] if c["source"] == gt["cameras"]["pixel"][0])
+        lum = luminance(store.paths(name).output / exporter.sanitize_filename(WIDE["name"]) / pixel["output"])
+        black = int(pixel["pre_pad"] * FPS)
+        assert lum[: black - 1].max() < 20 and lum[black + 2: black + 30].mean() > 30
+    finally:
+        with store.edit(name) as d:
+            d["settings"]["hwaccel"] = False

@@ -155,11 +155,18 @@ in `output/<take>/`.
   away); inside the ±W window a quarter of that score is enough, since the
   window already rules out the far-away look-alikes. W defaults to 1.5 s.
 - **GPU decode** uses `-hwaccel cuda` for proxies and export (falls back to CPU
-  if it fails); the **h264_nvenc** encoder is in the export options.
+  if it fails). On export the frames then stay on the GPU for the fps
+  conversion, scaling and 10→8-bit conversion (`scale_cuda`); they only come
+  down to system memory for rotation and black padding (no CUDA filters for
+  those in common ffmpeg builds) or for libx264. With the **h264_nvenc** encoder
+  and nothing to rotate or pad, the whole chain runs on the GPU.
+- **NVENC speed**: at 4K the encoder is the bottleneck (decoding runs ~5× faster).
+  On an RTX 3090, 20 s of 4K60 takes 16 s at `p5` (default), 11 s at `p4`, 8 s at
+  `p3`; 1080p output takes 4 s at `p5`.
 - **Files at once** (*Output*, 1 by default, up to 3) runs several ffmpegs side
-  by side, across takes. It pays off when decoding is the bottleneck (NVENC, 4K
-  or HEVC phone footage); with libx264 a single ffmpeg already uses every core.
-  Cancel stops all of them.
+  by side, across takes. It only helps when the encoder isn't saturated: a GPU
+  with a single NVENC (e.g. RTX 3090) encodes one file at a time regardless, and
+  libx264 already uses every core. Cancel stops all of them.
 - **Long side** (1920 by default) only ever downscales; *keep* exports at source
   resolution.
 
