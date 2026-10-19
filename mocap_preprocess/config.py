@@ -26,6 +26,7 @@ DEFAULT_SETTINGS = {
     "hwaccel": False,
     "sync_min_score": 0.10,
     "sync_min_ratio": 1.3,
+    "sync_window": 1.5,
 }
 
 DEFAULT_EXPORT_OPTIONS = {

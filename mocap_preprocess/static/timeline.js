@@ -24,10 +24,11 @@ const C = {
   takeFillSel: 'rgba(232,151,104,0.30)',
   takeStroke: 'rgba(232,151,104,0.45)',
 };
-// bar colours by sync method: reference/audio normal, metadata amber, none red, manual blue
+// bar colours by sync method: reference/audio normal, full search orange, metadata amber, none red, manual blue
 const METHOD = {
   reference: ['rgba(255,255,255,0.07)', 'rgba(255,255,255,0.22)', 'rgba(255,255,255,0.15)'],
   audio: ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0.18)', 'rgba(255,255,255,0.14)'],
+  search: ['rgba(232,151,104,0.12)', 'rgba(232,151,104,0.60)', 'rgba(232,151,104,0.24)'],
   metadata: ['rgba(226,179,91,0.12)', 'rgba(226,179,91,0.60)', 'rgba(226,179,91,0.24)'],
   none: ['rgba(229,103,103,0.12)', 'rgba(229,103,103,0.60)', 'rgba(229,103,103,0.24)'],
   manual: ['rgba(136,128,240,0.14)', 'rgba(136,128,240,0.65)', 'rgba(136,128,240,0.26)'],

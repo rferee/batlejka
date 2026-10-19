@@ -148,7 +148,7 @@ def _apply_settings(data: dict, payload: dict) -> None:
         st["proxy_long_side"] = max(160, min(1920, int(payload["proxy_long_side"])))
     if "hwaccel" in payload:
         st["hwaccel"] = bool(payload["hwaccel"])
-    for key, lo, hi in (("sync_min_score", 0.0, 1.0), ("sync_min_ratio", 1.0, 100.0)):
+    for key, lo, hi in (("sync_min_score", 0.0, 1.0), ("sync_min_ratio", 1.0, 100.0), ("sync_window", 0.2, 30.0)):
         if key in payload:
             st[key] = max(lo, min(hi, float(payload[key])))
 
@@ -359,11 +359,11 @@ def list_jobs(session: str | None = None):
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str, log_since: int = 0):
+def get_job(job_id: str, log_since: int = 0, live: bool = False):
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "job not found")
-    return job.info(log_since=log_since)
+    return job.info(log_since=log_since, live=live)
 
 
 @app.post("/api/jobs/{job_id}/cancel")

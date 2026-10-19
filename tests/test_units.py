@@ -111,6 +111,42 @@ def test_ncc_rejects_unrelated_audio():
     assert m.score < 0.1 or m.ratio < 1.3
 
 
+def test_window_and_dot_curves_match_the_full_search():
+    sr = 2000
+    rng = np.random.default_rng(6)
+    r = syncing.prepare(_room(40 * sr, rng))
+    x = syncing.prepare(r[12 * sr: 20 * sr] + rng.standard_normal(8 * sr).astype(np.float32) * 0.3)
+    m = syncing.ncc_match(r, x, sr)
+    w = syncing.window_curve(r, x, m.lag - 50, m.lag + 50, sr)
+    assert int(np.nanargmax(w)) == 50 and w[50] == pytest.approx(m.score, rel=1e-4)
+    d = syncing.dot_curve(r, x, m.lag - 3, m.lag + 3)
+    assert np.allclose(d, w[47:54], atol=1e-4)
+    # the longer signal may be either one
+    w2 = syncing.window_curve(x, r, -m.lag - 50, -m.lag + 50, sr)
+    assert np.allclose(w2[::-1], w, atol=1e-5)
+
+
+def test_consensus_is_the_largest_cluster_not_the_mean():
+    votes = [76.1, 76.4, 75.9, 76.3, -2874.7, -2874.6, 2015.2, 690.5]
+    c = syncing.consensus(votes)
+    assert c.support == 4 and c.runner_up == 2
+    assert c.center == pytest.approx(76.2, abs=0.11)
+    assert syncing.consensus([]) is None
+
+
+def test_stamp_modes_from_cluster_tightness():
+    """Camera B stamps the end of its clips: only that reading makes the
+    implied clock differences of clips with different lengths agree."""
+    d_a, d_b = [15.0, 33.0, 8.0], [20.0, 9.0, 41.0]   # clip lengths of the matched pairs
+    k = -30.0                                         # K_A − K_B: B's clock runs 30 s ahead
+    # implied K_A − K_B of each match when A is read as `ma` and B as `mb`
+    xs = {(ma, mb): syncing.consensus([k + (db if mb == "start" else 0.0) + (da if ma == "end" else 0.0)
+                                       for da, db in zip(d_a, d_b)])
+          for ma in syncing.MODES for mb in syncing.MODES}
+    modes, basis = syncing.SessionSync.choose_modes(["A", "B"], {("A", "B"): xs})
+    assert modes == {"A": "start", "B": "end"} and basis["B"] == "measured"
+
+
 def test_xcorr_matches_scipy_correlate():
     from scipy import signal
     rng = np.random.default_rng(4)

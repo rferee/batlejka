@@ -1,6 +1,7 @@
 // mocap-preprocess UI. Plain ES modules, no build step.
 import { applyFit, Grid } from './grid.js';
 import { Timeline } from './timeline.js';
+import { SyncViz, snapshotFromSession, replayFrames } from './syncviz.js';
 
 // ------------------------------------------------------------------ helpers
 export function h(tag, props = null, ...kids) {
@@ -155,7 +156,7 @@ export const videoFiles = () => (S.data?.files || []).filter((f) => f.probe && f
 export const targetFps = () => S.data?.settings?.target_fps || '30000/1001';
 
 export const METHOD_COLORS = {
-  reference: '#97d47d', audio: '#d3d3d3', metadata: '#E2B35B', none: '#E56767', manual: '#8880F0',
+  reference: '#97d47d', audio: '#d3d3d3', search: '#E89768', metadata: '#E2B35B', none: '#E56767', manual: '#8880F0',
 };
 
 // ------------------------------------------------------------------ header
@@ -600,7 +601,9 @@ const ProcessScreen = {
           h('input', { class: 'input sm', type: 'number', step: '0.01', min: '0', max: '1', value: st.sync_min_score, onchange: (e) => putSettings({ sync_min_score: Number(e.target.value) }) })),
         h('label', { class: 'kv' }, 'min ratio',
           h('input', { class: 'input sm', type: 'number', step: '0.1', min: '1', value: st.sync_min_ratio, onchange: (e) => putSettings({ sync_min_ratio: Number(e.target.value) }) })),
-        h('span', { class: 'note' }, 'score = normalized correlation peak; ratio = peak vs. best peak >0.1 s away. Low ratio usually means looping music matched a bar off.')) : null);
+        h('label', { class: 'kv' }, 'window ±W (min, s)',
+          h('input', { class: 'input sm', type: 'number', step: '0.1', min: '0.2', max: '30', value: st.sync_window ?? 1.5, onchange: (e) => putSettings({ sync_window: Number(e.target.value) }) })),
+        h('span', { class: 'note' }, 'score = normalized correlation peak; ratio = peak vs. best peak >0.1 s away. Each clip is matched only within ±W of its camera-clock prediction (W = this, or 3× the clock spread if larger), so looping music cannot pull it a bar off. Inside the window a quarter of the min score is enough; the ratio does the work.')) : null);
     this.form = form;
     L.append(form);
     this.actions = h('div', { class: 'col', style: { gap: '12px' } });
@@ -919,15 +922,37 @@ screens.cameras = CamerasScreen;
 window.addEventListener('beforeunload', () => CamerasScreen.flush());
 
 // ------------------------------------------------------------------ Sync screen
+const SYNC_PHASES = [
+  ['audio', 'timestamps'], ['links', 'camera clocks'], ['align', 'audio within ±W'], ['search', 'full search'], ['check', 'checks'],
+];
+function fmtAhead(s) {
+  if (s == null) return '—';
+  const a = Math.abs(s);
+  const sign = s >= 0 ? '+' : '−';
+  if (a < 60) return `${sign}${a.toFixed(2)} s`;
+  if (a < 3600) return `${sign}${Math.floor(a / 60)}:${pad2(Math.floor(a % 60))} min`;
+  return `${sign}${Math.floor(a / 3600)}:${pad2(Math.floor(a / 60) % 60)}:${pad2(Math.floor(a % 60))} h`;
+}
 const SyncScreen = {
   resyncManual: false,
   mount(root) {
     this.root = h('main', { class: 'page' });
     root.append(this.root);
+    this.vizBox = h('div', { class: 'viz-canvas' });
+    this.viz = new SyncViz(this.vizBox);
+    this.shown = false;
     this.render();
+  },
+  unmount() {
+    clearTimeout(this.liveTimer);
+    this.liveTimer = null;
+    this.stopReplay();
+    if (this.viz) this.viz.destroy();
+    this.viz = null;
   },
   update() { this.render(); },
   async onJobs() {
+    if (activeJob('sync')) this.startLive();
     await this.fetchLog();
     this.renderLeftDynamic();
   },
@@ -945,34 +970,108 @@ const SyncScreen = {
       jobLogs.set(j.id, have);
     } catch { /* pruned */ }
   },
+  // the live picture: the job publishes a snapshot, polled faster than the job list
+  startLive() {
+    if (this.liveTimer || !this.viz) return;
+    this.stopReplay();
+    const tick = async () => {
+      const j = activeJob('sync');
+      if (!j || !this.viz) { this.liveTimer = null; return; }
+      const have = jobLogs.get(j.id) || { seq: 0, lines: [] };
+      try {
+        const full = await GET(`/api/jobs/${j.id}?log_since=${have.seq}&live=true`);
+        have.lines.push(...full.log);
+        have.seq = full.log_seq;
+        have.status = full.status;
+        jobLogs.set(j.id, have);
+        Object.assign(j, { progress: full.progress, message: full.message, log_seq: full.log_seq });
+        if (full.live && this.viz) {
+          this.lastLive = full.live;
+          this.viz.setData(full.live);
+        }
+        this.renderLeftDynamic();
+        if (!isActive(full)) { this.liveTimer = null; pollSoon(); return; }
+      } catch { /* pruned */ }
+      this.liveTimer = setTimeout(tick, 300);
+    };
+    this.liveTimer = setTimeout(tick, 0);
+  },
+  replay() {
+    this.stopReplay();
+    const frames = replayFrames(snapshotFromSession(S.data, videoFiles()));
+    this.replaying = true;
+    this.timers = frames.map(([t, snap]) => setTimeout(() => {
+      this.replayPhase = snap.phase;
+      if (this.viz) this.viz.setData(snap);
+      this.renderVizHead();
+    }, t));
+    this.timers.push(setTimeout(() => { this.replaying = false; this.renderVizHead(); }, frames[frames.length - 1][0] + 60));
+    this.renderVizHead();
+  },
+  stopReplay() {
+    for (const t of this.timers || []) clearTimeout(t);
+    this.timers = [];
+    this.replaying = false;
+  },
   render() {
     const r = this.root;
     r.innerHTML = '';
     if (!S.data) return;
     const vids = videoFiles();
-    const ref = vids.find((f) => f.sync?.method === 'reference');
-    const longest = [...vids].filter((f) => f.probe.audio).sort((a, b) => b.probe.duration - a.probe.duration)[0];
     const st = S.data.settings;
     const manual = vids.filter((f) => f.sync?.method === 'manual').length;
-    this.left = h('div', { class: 'col', style: { gap: '20px', minWidth: 0 } });
-    this.left.append(
+    this.vizHead = h('div', { class: 'viz-head' });
+    this.progress = h('div', { class: 'viz-progress' });
+    this.log = h('div', { class: 'log' });
+    r.append(
       h('div', { class: 'page-head' },
         h('h1', null, 'Syncing'),
-        h('p', null, 'audio cross-correlation (skelly_synchronize math, one session timeline) · reference ',
-          h('span', { class: 'accent' }, (ref || longest) ? basename((ref || longest).rel) : '—'))),
+        h('p', null, 'Every camera has its own clock. Clips start ', h('span', { class: 'accent' }, 'orange'),
+          ' where their timestamps put them, move once their camera\'s clock is worked out from audio links, and turn ',
+          h('span', { class: 'ok' }, 'green'), ' when the audio clicks them into place within ±W.')),
       h('div', { class: 'row' },
         this.runBtn = h('button', { class: 'btn primary big', onclick: () => this.run() }),
         manual ? h('div', { class: 'toggle', onclick: () => { this.resyncManual = !this.resyncManual; this.render(); } },
           h('span', { class: `check ${this.resyncManual ? 'on' : ''}` }, icon('check')), `re-sync ${manual} manual file(s) too`) : null,
-        h('span', { class: 'note' }, `accept: score ≥ ${st.sync_min_score} · ratio ≥ ${st.sync_min_ratio} @ ${st.sync_sample_rate} Hz (Process › Advanced)`)),
-      this.progress = h('div', { class: 'col', style: { gap: '8px' } }),
-      this.log = h('div', { class: 'log' }));
-    const right = h('div', { class: 'col', style: { gap: '16px' } });
-    right.append(this.offsetsCard(vids));
-    right.append(this.summary(vids));
-    r.append(h('div', { class: 'sync-split' }, this.left, right));
+        h('span', { class: 'note' }, `window ±${st.sync_window ?? 1.5} s or 3× clock spread · accept: score ≥ ${st.sync_min_score} · ratio ≥ ${st.sync_min_ratio} · ${st.sync_sample_rate} Hz (Process › Advanced)`)),
+      h('div', { class: 'card viz-card' }, this.vizHead, this.progress, this.vizBox),
+      this.summary(vids) || '',
+      h('div', { class: 'section-rule' }, h('span', null, 'details')),
+      h('div', { class: 'sync-split' },
+        h('div', { class: 'col', style: { gap: '16px', minWidth: 0 } }, h('span', { class: 'card-title' }, 'Log'), this.log),
+        h('div', { class: 'col', style: { gap: '16px', minWidth: 0 } }, this.clocksCard(), this.offsetsCard(vids))));
+    if (!activeJob('sync') && !this.replaying && this.viz) {
+      this.viz.setData(snapshotFromSession(S.data, vids), { instant: !this.shown });
+      this.shown = true;
+    }
+    if (activeJob('sync')) this.startLive();
     this.renderLeftDynamic();
     this.fetchLog().then(() => this.renderLeftDynamic());
+  },
+  renderVizHead() {
+    if (!this.vizHead || !this.vizHead.isConnected) return;
+    const active = activeJob('sync');
+    let phase = S.data.state.synced_at ? 'done' : 'idle';
+    if (this.replaying) phase = this.replayPhase || 'audio';
+    else if (active) phase = this.lastLive?.phase || 'audio';
+    const idx = SYNC_PHASES.findIndex(([id]) => id === phase);
+    const n = this.viz ? this.viz.counts() : {};
+    this.vizHead.innerHTML = '';
+    this.vizHead.append(
+      h('div', { class: 'vsteps' }, SYNC_PHASES.map(([id, label], i) => {
+        const done = phase === 'done' || (idx >= 0 && i < idx);
+        return h('span', { class: `vstep${done ? ' done' : ''}${i === idx ? ' on' : ''}` },
+          h('b', null, done ? icon('check') : String(i + 1)), label);
+      })),
+      h('div', { class: 'vcounts' },
+        h('span', null, h('span', { class: 'dot sq', style: { background: '#97d47d' } }), `${n.clicked || 0} clicked`),
+        h('span', null, h('span', { class: 'dot sq', style: { background: '#E89768' } }), `${n.rough || 0} rough`),
+        n.fallback ? h('span', null, h('span', { class: 'dot sq', style: { background: '#E2B35B' } }), `${n.fallback} by clock`) : null,
+        n.manual ? h('span', null, h('span', { class: 'dot sq', style: { background: '#8880F0' } }), `${n.manual} manual`) : null,
+        n.none ? h('span', null, h('span', { class: 'dot sq', style: { background: '#E56767' } }), `${n.none} unplaced`) : null,
+        !active && S.data.sync?.frame != null
+          ? h('button', { class: 'btn xs', title: 'Replay this sync', onclick: () => this.replay(), disabled: this.replaying }, icon('rotate-left'), 'Replay')
+          : null));
   },
   renderLeftDynamic() {
     if (!this.log || !this.log.isConnected) return;
@@ -981,28 +1080,59 @@ const SyncScreen = {
     this.runBtn.innerHTML = '';
     this.runBtn.append(...(active ? [icon('xmark'), 'Cancel'] : [icon('wave-square'), S.data.state.synced_at ? 'Sync again' : 'Run sync']));
     this.progress.innerHTML = '';
-    if (j) {
+    if (j && active) {
       const pct = Math.round(j.progress * 100);
       this.progress.append(
-        h('div', { class: 'progress-label' }, h('span', null, active ? (j.message || 'starting…') : j.status), h('span', null, `${pct}%`)),
-        h('div', { class: `progress ${j.status === 'done' ? 'done' : ''}` }, h('div', { style: { width: `${pct}%` } })));
+        h('div', { class: 'progress-label' }, h('span', null, j.message || 'starting…'), h('span', null, `${pct}%`)),
+        h('div', { class: 'progress' }, h('div', { style: { width: `${pct}%` } })));
     }
+    this.renderVizHead();
     const lines = j ? (jobLogs.get(j.id)?.lines || []) : [];
+    const stick = this.log.scrollTop + this.log.clientHeight >= this.log.scrollHeight - 8;
     this.log.innerHTML = '';
     if (!lines.length) {
-      this.log.append(h('span', { class: 'dim' }, j ? '…' : '$ press Run sync — every clip gets correlated against the longest file with audio, then against whatever got placed in the previous pass.'));
+      this.log.append(h('span', { class: 'dim' }, j ? '…' : '$ press Run sync — clocks first (timestamps + audio links between cameras), then every clip is matched by audio only within ±W of where its clock says it is.'));
     }
     for (const l of lines) {
       const cls = l.msg.startsWith('done') ? 'l-done' : `l-${l.level}`;
       this.log.append(h('span', { class: cls }, l.msg));
     }
-    this.log.scrollTop = this.log.scrollHeight;
+    if (stick) this.log.scrollTop = this.log.scrollHeight;
   },
   async run() {
     const active = activeJob('sync');
     if (active) { cancelJob(active.id); return; }
+    this.stopReplay();
+    this.lastLive = null;
     await startJob('/sync', { resync_manual: this.resyncManual });
+    this.startLive();
     this.renderLeftDynamic();
+  },
+  clocksCard() {
+    const sync = S.data.sync || {};
+    const info = sync.cameras || {};
+    const cams = S.data.cameras.filter((c) => info[c.id]);
+    if (!cams.length) return null;
+    const viaLabel = { reference: 'reference', link: 'audio links', search: 'full search', 'median clock': 'assumed (median clock)', 'manual offset': 'your manual offset' };
+    return h('div', { class: 'card', style: { gap: '8px' } },
+      h('span', { class: 'card-title' }, 'Camera clocks'),
+      h('div', { class: 'clocks' },
+        h('span', { class: 'th' }, 'camera'), h('span', { class: 'th' }, 'vs reference'), h('span', { class: 'th' }, 'stamps'),
+        h('span', { class: 'th', title: 'matches agreeing within ±1 s / all matches' }, 'agree'), h('span', { class: 'th' }, 'spread'), h('span', { class: 'th' }, '±W'),
+        cams.map((c) => {
+          const k = info[c.id];
+          const isRef = c.id === sync.reference_camera;
+          const cls = !k.attached && k.via !== 'manual offset' ? 'warn' : '';
+          return [
+            h('span', { class: 'ellipsis', title: `${c.name} — ${viaLabel[k.via] || k.via}` }, c.name),
+            h('span', { class: cls || (isRef ? 'ok' : ''), title: 'camera clock minus reference clock' }, isRef ? 'reference' : k.attached || k.via === 'manual offset' ? fmtAhead(-k.offset) : 'unknown'),
+            h('span', { title: k.mode_basis === 'measured' ? 'told apart by the clock links' : 'not measurable (clips of equal length) — nearest clock assumed' }, `${k.mode}${k.mode_basis === 'measured' ? '' : '?'}`),
+            h('span', null, k.votes ? `${k.support}/${k.votes}` : '—'),
+            h('span', null, `${k.spread.toFixed(2)} s`),
+            h('span', null, `${k.window.toFixed(1)} s`),
+          ];
+        })),
+      h('span', { class: 'note' }, 'vs reference: how far the camera\'s clock is ahead (+) or behind. stamps: whether creation_time marks the start or the end of a recording (? = not measurable, nearest clock assumed).'));
   },
   offsetsCard(vids) {
     const card = h('div', { class: 'card', style: { gap: '4px' } }, h('span', { class: 'card-title' }, 'Offsets'));
@@ -1013,10 +1143,12 @@ const SyncScreen = {
       card.append(h('div', { class: 'offsets' }, h('span', { class: 'cam-h' }, cam.name),
         files.sort((a, b) => (a.offset ?? 1e12) - (b.offset ?? 1e12)).map((f) => {
           const m = f.offset == null ? 'none' : (f.sync?.method || 'none');
+          const flags = f.sync?.flags || [];
           const conf = f.sync?.score != null ? `${f.sync.score.toFixed(2)} · ${f.sync.ratio != null ? f.sync.ratio.toFixed(1) : '–'}×` : m === 'reference' ? 'ref' : m;
-          return h('div', { class: 'offrow', title: `${f.rel} — ${METHOD_LABEL[m]}${f.sync?.via ? ` (${f.sync.via})` : ''}` },
+          const title = [`${f.rel} — ${METHOD_LABEL[m] || m}${f.sync?.via ? ` (${f.sync.via})` : ''}`, f.sync?.reason, ...flags].filter(Boolean).join('\n');
+          return h('div', { class: 'offrow', title },
             h('span', { class: 'dot', style: { background: METHOD_COLORS[m] } }),
-            h('span', { class: 'ellipsis' }, basename(f.rel)),
+            h('span', { class: 'ellipsis' }, flags.length ? h('span', { class: 'warn' }, icon('triangle-exclamation'), ' ') : null, basename(f.rel)),
             h('span', { class: 'val' }, f.offset != null ? fmtOffset(f.offset) : '—'),
             h('span', { class: 'conf' }, conf));
         })));
@@ -1026,16 +1158,21 @@ const SyncScreen = {
     return card;
   },
   summary(vids) {
-    if (!S.data.state.synced_at) return h('div', { class: 'note' }, 'Offsets above are provisional (creation time). Run sync to place clips by audio.');
+    if (activeJob('sync')) return null;
+    if (!S.data.state.synced_at) return h('div', { class: 'note' }, 'Offsets are provisional (creation time). Run sync to place clips by audio.');
     const meta = vids.filter((f) => f.sync?.method === 'metadata');
+    const search = vids.filter((f) => f.sync?.method === 'search');
     const none = vids.filter((f) => f.offset == null || f.sync?.method === 'none');
-    const good = vids.length - meta.length - none.length;
-    const allGood = !meta.length && !none.length;
+    const flagged = vids.filter((f) => (f.sync?.flags || []).length);
+    const good = vids.length - meta.length - none.length - search.length;
+    const allGood = !meta.length && !none.length && !search.length && !flagged.length;
     return h('div', { class: 'card', style: { flexDirection: 'row', alignItems: 'center', gap: '14px', padding: '16px 20px' } },
       h('img', { src: `/static/assets/${allGood ? 'success-sign-green' : 'warning-sign-orange'}.svg`, alt: '', style: { width: '28px', height: '28px' } }),
       h('span', { style: { flex: 1, fontSize: '13px', lineHeight: 1.5 } },
-        allGood ? `All ${vids.length} clips aligned.` : `${good}/${vids.length} clips aligned by audio.`,
-        meta.length ? h('span', { class: 'warn' }, ` ${meta.length} placed by metadata — check them on the timeline.`) : null,
+        allGood ? `All ${vids.length} clips aligned.` : `${good}/${vids.length} clips aligned by audio near their camera clock.`,
+        search.length ? h('span', { class: 'warn' }, ` ${search.length} placed by full search only — check them.`) : null,
+        meta.length ? h('span', { class: 'warn' }, ` ${meta.length} placed by camera clock only — check them on the timeline.`) : null,
+        flagged.length ? h('span', { class: 'warn' }, ` ${flagged.length} flagged (see Offsets).`) : null,
         none.length ? h('span', { class: 'err' }, ` ${none.length} unplaced.`) : null),
       h('button', { class: 'btn primary', onclick: () => go('review') }, 'Open timeline', icon('arrow-right')));
   },
@@ -1045,7 +1182,7 @@ screens.sync = SyncScreen;
 // ------------------------------------------------------------------ Review & export screen
 const SPEEDS = [0.25, 0.5, 1, 2];
 const METHOD_LABEL = {
-  reference: 'reference', audio: 'audio match', metadata: 'metadata (check)', none: 'unplaced', manual: 'manual',
+  reference: 'reference', audio: 'audio match', search: 'full search (check)', metadata: 'camera clock (check)', none: 'unplaced', manual: 'manual',
 };
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
@@ -1806,7 +1943,10 @@ const ReviewScreen = {
         h('span', null, 'audio'), h('span', { class: p.audio ? '' : 'warn' }, p.audio ? 'yes' : 'none'),
         h('span', null, 'created'), h('span', null, fmtDate(p.creation_time)),
         h('span', null, 'sync'), h('span', { style: { color: METHOD_COLORS[method] } }, METHOD_LABEL[method] + (sync.via ? ` · ${sync.via}` : '')),
+        sync.reason ? [h('span', null, 'why'), h('span', { class: 'warn' }, sync.reason)] : null,
         sync.score != null ? [h('span', null, 'score'), h('span', null, `${sync.score.toFixed(3)} · ratio ${sync.ratio != null ? sync.ratio.toFixed(2) : '—'}`)] : null,
+        sync.clock_dev != null ? [h('span', null, 'vs clock'), h('span', null, `${sync.clock_dev >= 0 ? '+' : '−'}${Math.abs(sync.clock_dev).toFixed(3)} s from its camera clock`)] : null,
+        (sync.flags || []).length ? [h('span', null, 'flags'), h('span', { class: 'warn' }, sync.flags.join(' · '))] : null,
         ref ? [h('span', null, 'against'), h('span', { title: ref.rel }, basename(ref.rel))] : null),
       h('div', { class: 'insp-sec' },
         h('span', { class: 'lbl' }, 'offset (session time of file start, s)'),

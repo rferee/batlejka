@@ -80,5 +80,60 @@ def synced(processed):
     return store, name, gt
 
 
+@pytest.fixture(scope="session")
+def scenario(store):
+    """scenario(name) → (store, name, ground truth): built (cached), scanned,
+    processed (no proxies) and synced once per test run."""
+    from mocap_preprocess import pipeline, syncing
+    from mocap_preprocess.jobs import Job
+    import make_synthetic_session as gen
+
+    done = {}
+
+    def get(name):
+        if name not in done:
+            session = gen.build_scenario(SESSIONS, name)
+            for d in (session / ".preprocess", session / "output"):
+                shutil.rmtree(d, ignore_errors=True)
+            pipeline.scan(store, name, Job("scan", name))
+            pipeline.process(store, name, Job("process", name))
+            syncing.sync_session(store, name, Job("sync", name))
+            done[name] = json.loads((session / "ground_truth.json").read_text())
+        return store, name, done[name]
+    return get
+
+
 def files_by_rel(data: dict) -> dict:
     return {f["rel"]: f for f in data["files"]}
+
+
+def overlap_components(gt: dict) -> list[list[str]]:
+    """Audio files grouped by true overlap (> 1 s): offsets can only be checked
+    against clips something links them to."""
+    rels = [r for r, t in gt["files"].items() if t["audio"]]
+    iv = {r: (gt["files"][r]["offset"], gt["files"][r]["offset"] + gt["files"][r]["duration"]) for r in rels}
+    parent = {r: r for r in rels}
+
+    def find(x):
+        while parent[x] != x:
+            x = parent[x]
+        return x
+    for a in rels:
+        for b in rels:
+            if a < b and min(iv[a][1], iv[b][1]) - max(iv[a][0], iv[b][0]) > 1.0:
+                parent[find(a)] = find(b)
+    comps: dict[str, list[str]] = {}
+    for r in rels:
+        comps.setdefault(find(r), []).append(r)
+    return list(comps.values())
+
+
+def sync_errors(data: dict, gt: dict) -> dict[str, float]:
+    """Per audio file: its offset error relative to the longest clip it's linked to."""
+    by = files_by_rel(data)
+    out = {}
+    for comp in overlap_components(gt):
+        anchor = max(comp, key=lambda r: gt["files"][r]["duration"])
+        for r in comp:
+            out[r] = (by[r]["offset"] - by[anchor]["offset"]) - (gt["files"][r]["offset"] - gt["files"][anchor]["offset"])
+    return out

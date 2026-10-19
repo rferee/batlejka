@@ -123,6 +123,7 @@ def default_session(name: str) -> dict:
         "files": [],
         "cameras": [],
         "takes": [],
+        "sync": {},
         "export_options": copy.deepcopy(config.DEFAULT_EXPORT_OPTIONS),
         "state": {"scanned_at": None, "processed_at": None, "synced_at": None, "exported_at": None},
     }

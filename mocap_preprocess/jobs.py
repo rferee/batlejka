@@ -37,6 +37,7 @@ class Job:
         self._seq = 0
         self._lock = threading.Lock()
         self.done_event = threading.Event()
+        self.live = None   # optional JSON snapshot a job publishes for a live view
 
     # -- used by job functions -------------------------------------------
     def log(self, msg: str, level: str = "info") -> None:
@@ -58,7 +59,7 @@ class Job:
             raise Cancelled()
 
     # -- reporting ---------------------------------------------------------
-    def info(self, log_since: int | None = None) -> dict:
+    def info(self, log_since: int | None = None, live: bool = False) -> dict:
         d = {
             "id": self.id,
             "kind": self.kind,
@@ -79,6 +80,8 @@ class Job:
                 d["log"] = [e for e in self._log if e["seq"] > log_since]
             else:
                 d["log_tail"] = list(self._log)[-3:]
+        if live:
+            d["live"] = self.live
         return d
 
 

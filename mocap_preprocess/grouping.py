@@ -33,18 +33,23 @@ def signature(f: dict) -> tuple:
             v.get("display_height"), v.get("nominal_fps"))
 
 
-def interval(f: dict) -> tuple[float, float] | None:
+def interval(f: dict, stamp: str = "start") -> tuple[float, float] | None:
     ct = f["probe"].get("creation_time")
     if ct is None:
         return None
-    return ct, ct + float(f["probe"].get("duration") or 0)
+    d = float(f["probe"].get("duration") or 0)
+    return (ct, ct + d) if stamp == "start" else (ct - d, ct)
 
 
 def overlaps(a: dict, b: dict) -> bool:
-    ia, ib = interval(a), interval(b)
-    if ia is None or ib is None:
-        return False
-    return min(ia[1], ib[1]) - max(ia[0], ib[0]) > OVERLAP_LIMIT
+    """Recorded at the same time whether the device stamps creation_time at the
+    start or at the end of a recording (consecutive clips of an end-stamping
+    camera overlap if read as start stamps)."""
+    for stamp in ("start", "end"):
+        ia, ib = interval(a, stamp), interval(b, stamp)
+        if ia is None or ib is None or min(ia[1], ib[1]) - max(ia[0], ib[0]) <= OVERLAP_LIMIT:
+            return False
+    return True
 
 
 def pearson(x: np.ndarray | None, y: np.ndarray | None) -> float:

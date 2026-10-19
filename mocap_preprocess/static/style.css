@@ -293,6 +293,29 @@ table.ftable tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* ---------------------------------------------------------------- sync */
 .sync-split { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 32px; align-items: start; }
+.sync-split .log { max-height: 520px; }
+/* live sync view */
+.viz-card { padding: 18px 20px 14px; gap: 12px; background: var(--rf-bg-light); border-top: 2px solid var(--accent); }
+.viz-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.vsteps { display: flex; gap: 4px; flex-wrap: wrap; }
+.vstep { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px 5px 6px; font-size: 11px; color: var(--fg-2); opacity: .55; background: var(--surface-1); transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease); }
+.vstep b { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 10px; background: var(--surface-2); color: var(--fg-1); }
+.vstep.on { opacity: 1; color: var(--fg-1); background: var(--accent-tint-2); }
+.vstep.on b { background: var(--accent); color: var(--rf-bg); animation: vpulse 1.2s ease-in-out infinite; }
+.vstep.done { opacity: .9; }
+.vstep.done b { background: rgba(151, 212, 125, 0.25); color: var(--elven-green); }
+@keyframes vpulse { 50% { box-shadow: 0 0 0 4px var(--accent-tint-2); } }
+.vcounts { display: flex; align-items: center; gap: 14px; font-size: 11px; color: var(--fg-2); flex-wrap: wrap; }
+.vcounts > span { display: inline-flex; align-items: center; gap: 6px; }
+.viz-progress { display: flex; flex-direction: column; gap: 6px; }
+.viz-progress:empty { display: none; }
+.viz-canvas { position: relative; width: 100%; min-height: 80px; }
+.viz-canvas canvas { display: block; }
+.section-rule { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--fg-2); opacity: .55; text-transform: uppercase; letter-spacing: .12em; }
+.section-rule::before, .section-rule::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
+.clocks { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(80px, 1fr) 52px 52px 60px 48px; gap: 0 10px; font-size: 12px; }
+.clocks > span { padding: 6px 0; border-bottom: 1px solid var(--hairline-soft); white-space: nowrap; }
+.clocks .th { font-size: 10px; color: var(--fg-2); opacity: .6; padding-top: 0; }
 .offsets { display: flex; flex-direction: column; }
 .offsets .cam-h { font-size: 11px; color: var(--fg-2); opacity: .6; padding: 10px 0 4px; }
 .offrow { display: grid; grid-template-columns: 10px minmax(0, 1fr) 96px 90px; gap: 10px; align-items: center; font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--hairline-soft); }

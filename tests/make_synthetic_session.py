@@ -16,15 +16,21 @@ Every camera gets the same "room" soundtrack (music + claps at take starts)
 through its own EQ, gain and noise. Full-frame white flashes are burned into
 the video at known frames so exports can be checked for visual alignment.
 ``ground_truth.json`` records cameras, true offsets, takes, flashes.
+
+``--scenarios`` also builds small ``scn_*`` sessions for the two-stage sync
+(looping music, a camera minutes off that stamps end times, no continuous
+camera, files without metadata); see SCENARIOS.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -254,13 +260,224 @@ def build(out_root: Path, force: bool = False) -> Path:
     return session
 
 
+# --------------------------------------------------------------------- sync scenarios
+#
+# Small sessions (tiny static video, real AAC audio) that stress the two-stage
+# sync: every camera has its own clock, error and stamp convention.
+
+SCENARIO_VERSION = 2
+
+
+@dataclass
+class ScnCam:
+    prefix: str
+    make: str | None
+    model: str | None
+    clips: list[tuple[float, float]]     # true [start, end) in seconds
+    clock: float = 0.0                   # camera clock − true time
+    stamp: str = "start"                 # creation_time marks the start or the end
+    mic: tuple = ("bandpass", (150, 5000), 0.8, 0.010)
+    music: float = 1.0                   # gains of the room's parts at this camera
+    activity: float = 0.08
+    no_ct: tuple[int, ...] = ()          # clips without creation_time
+    anon: bool = False                   # no metadata at all
+    ext: str = "MOV"
+
+
+@dataclass
+class Scenario:
+    span: float
+    track: str                           # "room" or "loop"
+    cams: dict[str, ScnCam]
+    activity: list[tuple[float, float]] = field(default_factory=list)
+    speech: list[tuple[float, float]] = field(default_factory=list)
+    note: str = ""
+
+
+SCENARIOS = {
+    # (a) one 6 s music loop for the whole session; loud handling noise next to
+    # the continuous camera during the first take makes a whole-file search of
+    # that take's clips pick a quieter copy of the loop.
+    "scn_loop": Scenario(
+        span=130, track="loop", activity=[(28, 54)], speech=[(32, 50), (66, 82), (99, 117)],
+        note="looping music: a full search of take 1 against the continuous camera picks a loop copy",
+        cams={
+            "cont": ScnCam("C", "Sony", "ILME-FX3", [(0, 130)], clock=2.6, ext="MP4",
+                           mic=("lowpass", 6000, 0.7, 0.008), activity=1.6),
+            "a": ScnCam("IMG_1", "Apple", "iPhone 15", [(30, 52), (64, 84), (98, 120)], clock=0.3,
+                        mic=("highpass", 150, 1.0, 0.012)),
+            "b": ScnCam("SM_", "samsung", "SM-S918B", [(31, 51), (65, 83), (97, 119)], clock=-0.6, ext="mp4",
+                        mic=("bandpass", (300, 5000), 0.6, 0.010)),
+        }),
+    # (b) an action camera whose clock is 3 min fast and that stamps the END of each clip
+    "scn_clock": Scenario(
+        span=150, track="room",
+        cams={
+            "cont": ScnCam("P10", "Panasonic", "DC-GH6", [(0, 150)], clock=-1.4, mic=("lowpass", 6000, 0.7, 0.010)),
+            "p": ScnCam("IMG_2", "Apple", "iPhone 13 mini", [(10, 32), (48, 61), (85, 128)], clock=0.2,
+                        mic=("highpass", 150, 1.0, 0.014)),
+            "q": ScnCam("PXL_", "Google", "Pixel 8", [(11, 31), (47, 62), (86, 127)], clock=-0.5, ext="mp4",
+                        mic=("bandpass", (100, 4000), 0.9, 0.012)),
+            "gopro": ScnCam("GX01", "GoPro", "HERO11 Black", [(9, 33), (50, 58), (84, 129)], clock=197.3,
+                            stamp="end", ext="MP4", mic=("bandpass", (200, 6000), 0.8, 0.015)),
+        }),
+    # (c) no continuous camera: takes 1-2 bridged by one long clip, take 3 on its own
+    "scn_nocont": Scenario(
+        span=100, track="room",
+        cams={
+            "a": ScnCam("IMG_3", "Apple", "iPhone 12", [(5, 25), (30, 50), (70, 90)], clock=0.4,
+                        mic=("highpass", 150, 1.0, 0.012)),
+            "b": ScnCam("MI_", "Xiaomi", "2201123G", [(6, 24), (31, 49), (71, 88)], clock=-1.3, ext="mp4",
+                        mic=("bandpass", (300, 5000), 0.6, 0.010)),
+            "c": ScnCam("DJI_", "DJI", "Osmo Action 4", [(4, 40)], clock=38.2, ext="MP4",
+                        mic=("bandpass", (100, 4000), 0.9, 0.014)),
+        }),
+    # (d) files without metadata: one phone clip lacks creation_time, one camera has none at all
+    "scn_nometa": Scenario(
+        span=110, track="room",
+        cams={
+            "cont": ScnCam("MVI_", "Canon", "EOS R6", [(0, 110)], clock=0.9, ext="MP4", mic=("lowpass", 6000, 0.7, 0.010)),
+            "p": ScnCam("IMG_4", "Apple", "iPhone 14", [(12, 30), (45, 63), (80, 100)], clock=-0.3, no_ct=(1,),
+                        mic=("highpass", 150, 1.0, 0.012)),
+            "anon": ScnCam("REC", None, None, [(20, 35), (60, 78), (85, 104)], anon=True, ext="mp4",
+                           mic=("bandpass", (200, 4500), 0.8, 0.012)),
+        }),
+}
+
+
+def snap(t: float) -> int:
+    return int(round(Fraction(t).limit_denominator(1000) * FPS))
+
+
+def loop_track(seconds: float, sc: Scenario, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Music made of one 6 s loop repeated sample-exactly, plus the 'activity'
+    (handling noise, footsteps) and per-take speech-like sounds returned
+    separately so each camera can hear them at its own level."""
+    L = int(6.0 * SR)
+    t = np.arange(L) / SR
+    b, a = signal.butter(2, [200, 3000], btype="bandpass", fs=SR)
+    loop = signal.lfilter(b, a, rng.standard_normal(L)) * 0.05 * (0.65 + 0.35 * np.sin(2 * np.pi * t / 6.0))
+    for k in range(4):   # a chord every 1.5 s
+        sl = slice(int(k * 1.5 * SR), int((k + 1) * 1.5 * SR))
+        tt = t[sl] - k * 1.5
+        for f in rng.choice([110, 131, 147, 165, 196, 220, 262, 294], size=3, replace=False):
+            loop[sl] += 0.025 * np.exp(-tt * 1.5) * np.sin(2 * np.pi * f * tt + rng.uniform(0, 6.28))
+    for k in range(12):  # kick every 0.5 s
+        s = int(k * 0.5 * SR)
+        tt = np.arange(int(0.12 * SR)) / SR
+        loop[s:s + len(tt)] += 0.10 * np.sin(2 * np.pi * (60 + 40 * np.exp(-tt * 30)) * tt) * np.exp(-tt * 25)
+    n = int(seconds * SR)
+    music = np.tile(loop, n // L + 1)[:n]
+    return music, extras(n, sc, rng)
+
+
+def extras(n: int, sc: Scenario, rng: np.random.Generator) -> np.ndarray:
+    act = np.zeros(n)
+    b, a = signal.butter(2, [100, 4000], btype="bandpass", fs=SR)
+    for t0, t1 in sc.activity:
+        s0, s1 = int(t0 * SR), min(n, int(t1 * SR))
+        env = np.repeat(np.abs(rng.standard_normal((s1 - s0) // 2400 + 1)), 2400)[: s1 - s0]
+        act[s0:s1] += signal.lfilter(b, a, rng.standard_normal(s1 - s0)) * 0.08 * signal.lfilter([1 / 8] * 8, 1, env)
+    return act
+
+
+def speech_track(n: int, sc: Scenario, rng: np.random.Generator) -> np.ndarray:
+    """Syllable-like bursts of formant-filtered noise during each take, heard by everyone."""
+    out = np.zeros(n)
+    for t0, t1 in sc.speech:
+        t = t0
+        while t < t1:
+            dur = rng.uniform(0.08, 0.3)
+            s, L = int(t * SR), int(dur * SR)
+            f0 = rng.uniform(300, 1800)
+            b, a = signal.butter(2, [f0, f0 * 1.6], btype="bandpass", fs=SR)
+            out[s:s + L] += signal.lfilter(b, a, rng.standard_normal(L)) * 0.09 * np.hanning(L)
+            t += dur + rng.uniform(0.05, 0.4)
+    return out
+
+
+def scn_mic(track: np.ndarray, spec: tuple, seed: int) -> np.ndarray:
+    kind, cut, gain, noise_level = spec
+    b, a = signal.butter(2, cut, btype=kind, fs=SR)
+    y = signal.lfilter(b, a, track) * gain
+    y += np.random.default_rng(seed).standard_normal(len(y)) * noise_level
+    return np.clip(y, -1, 1).astype(np.float32)
+
+
+def view_image(path: Path, rng: np.random.Generator) -> None:
+    """A static, textured 'room' per camera (blocky noise), as a binary PPM."""
+    img = np.kron(rng.integers(30, 220, (9, 16, 3)), np.ones((10, 10, 1))).astype(np.uint8)
+    path.write_bytes(b"P6 160 90 255\n" + img.tobytes())
+
+
+def build_scenario(out_root: Path, name: str, force: bool = False) -> Path:
+    sc = SCENARIOS[name]
+    session = out_root / name
+    source = session / "source"
+    gt_path = session / "ground_truth.json"
+    if gt_path.exists() and not force:
+        try:
+            if json.loads(gt_path.read_text())["generator_version"] == SCENARIO_VERSION:
+                return session
+        except (ValueError, KeyError):
+            pass
+    if session.exists():
+        shutil.rmtree(session)
+    source.mkdir(parents=True)
+    work = out_root / f"_work_{name}"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    rng = np.random.default_rng(sum(map(ord, name)))
+    n = int((sc.span + 1) * SR)
+    if sc.track == "loop":
+        music, act = loop_track(sc.span + 1, sc, rng)
+    else:
+        music, act = room_soundtrack(sc.span + 1, rng), extras(n, sc, rng)
+    speech = speech_track(n, sc, rng)
+    gt = {"generator_version": SCENARIO_VERSION, "fps": "30000/1001", "note": sc.note, "files": {}, "cameras": {}}
+    for ci, (key, cam) in enumerate(sc.cams.items()):
+        img = work / f"{key}.ppm"
+        view_image(img, rng)
+        audio = scn_mic(music * cam.music + act * cam.activity + speech, cam.mic, 100 + ci)
+        gt["cameras"][key] = {"files": [], "clock": cam.clock, "stamp": cam.stamp}
+        for i, (t0, t1) in enumerate(cam.clips):
+            f0, f1 = snap(t0), snap(t1)
+            start, end = frame_time(f0), frame_time(f1)
+            rel = f"{cam.prefix}{i + 1:04d}.{cam.ext}"
+            wav = work / f"{key}_{i}.wav"
+            write_wav(wav, audio[int(round(start * SR)): int(round(end * SR))])
+            args = ["-loop", "1", "-framerate", "30000/1001", "-i", img, "-i", wav, "-map", "0:v", "-map", "1:a",
+                    "-frames:v", f1 - f0, "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "96k", "-map_metadata", "-1", "-movflags", "use_metadata_tags"]
+            has_ct = not cam.anon and i not in cam.no_ct
+            if has_ct:   # whole seconds, like real devices
+                stamp = (start if cam.stamp == "start" else end) + cam.clock
+                args += ["-metadata", f"creation_time={iso(EPOCH + timedelta(seconds=math.floor(stamp)))}"]
+            if not cam.anon:
+                if cam.make == "Apple":
+                    args += ["-metadata", f"com.apple.quicktime.make={cam.make}",
+                             "-metadata", f"com.apple.quicktime.model={cam.model}"]
+                else:
+                    args += ["-metadata", f"make={cam.make}", "-metadata", f"model={cam.model}"]
+            ffmpeg(*args, source / rel)
+            gt["files"][rel] = {"camera": key, "offset": start, "duration": end - start, "audio": True, "ct": has_ct}
+            gt["cameras"][key]["files"].append(rel)
+    gt_path.write_text(json.dumps(gt, indent=1))
+    shutil.rmtree(work, ignore_errors=True)
+    return session
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=str(DEFAULT_OUT), help="sessions folder to create 'synthetic' in")
+    ap.add_argument("--out", default=str(DEFAULT_OUT), help="sessions folder to create the sessions in")
     ap.add_argument("--force", action="store_true", help="rebuild even if up to date")
+    ap.add_argument("--scenarios", action="store_true", help="also build the sync scenarios (scn_*)")
     args = ap.parse_args()
     session = build(Path(args.out), force=args.force)
     print(f"synthetic session ready: {session}")
+    if args.scenarios:
+        for name in SCENARIOS:
+            print(f"scenario ready: {build_scenario(Path(args.out), name, force=args.force)}")
 
 
 if __name__ == "__main__":
