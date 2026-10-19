@@ -75,6 +75,19 @@ def _stderr_text(r: subprocess.CompletedProcess, limit: int = 600) -> str:
     return text[-limit:]
 
 
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and its children. On Windows ``ffmpeg`` is often a launcher
+    shim (Chocolatey, Scoop) whose real ffmpeg child would survive ``proc.kill()``
+    and keep encoding until it's done."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, creationflags=config.CREATE_NO_WINDOW)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def run_progress(
     args: list,
     duration: float,
@@ -109,10 +122,7 @@ def run_progress(
         while proc.poll() is None:
             if cancel.wait(0.2):
                 cancelled.set()
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                kill_tree(proc)
                 return
 
     t_err = threading.Thread(target=read_stderr, daemon=True)
