@@ -311,6 +311,7 @@ def probe(path: str | os.PathLike) -> dict:
             "nominal_fps": snap_fps(af) if af else None,
             "vfr_suspect": bool(rf and af and abs(float(rf) / float(af) - 1) > 0.002),
             "nb_frames": _int(vstream.get("nb_frames")),
+            "duration": _float(vstream.get("duration")),
             "start": _float(vstream.get("start_time"), format_start),
             "pix_fmt": vstream.get("pix_fmt"),
         }

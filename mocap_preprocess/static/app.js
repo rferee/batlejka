@@ -1,5 +1,6 @@
 // mocap-preprocess UI. Plain ES modules, no build step.
-import { applyFit } from './grid.js';
+import { applyFit, Grid } from './grid.js';
+import { Timeline } from './timeline.js';
 
 // ------------------------------------------------------------------ helpers
 export function h(tag, props = null, ...kids) {
@@ -908,6 +909,923 @@ const CamerasScreen = {
 };
 screens.cameras = CamerasScreen;
 window.addEventListener('beforeunload', () => CamerasScreen.flush());
+
+// ------------------------------------------------------------------ Sync screen
+const SyncScreen = {
+  resyncManual: false,
+  mount(root) {
+    this.root = h('main', { class: 'page' });
+    root.append(this.root);
+    this.render();
+  },
+  update() { this.render(); },
+  async onJobs() {
+    await this.fetchLog();
+    this.renderLeftDynamic();
+  },
+  job() { return activeJob('sync') || lastJob('sync'); },
+  async fetchLog() {
+    const j = this.job();
+    if (!j) return;
+    const have = jobLogs.get(j.id) || { seq: 0, lines: [] };
+    if (have.seq >= j.log_seq) return;
+    try {
+      const full = await GET(`/api/jobs/${j.id}?log_since=${have.seq}`);
+      have.lines.push(...full.log);
+      have.seq = full.log_seq;
+      have.status = full.status;
+      jobLogs.set(j.id, have);
+    } catch { /* pruned */ }
+  },
+  render() {
+    const r = this.root;
+    r.innerHTML = '';
+    if (!S.data) return;
+    const vids = videoFiles();
+    const ref = vids.find((f) => f.sync?.method === 'reference');
+    const longest = [...vids].filter((f) => f.probe.audio).sort((a, b) => b.probe.duration - a.probe.duration)[0];
+    const st = S.data.settings;
+    const manual = vids.filter((f) => f.sync?.method === 'manual').length;
+    this.left = h('div', { class: 'col', style: { gap: '20px', minWidth: 0 } });
+    this.left.append(
+      h('div', { class: 'page-head' },
+        h('h1', null, 'Syncing'),
+        h('p', null, 'audio cross-correlation (skelly_synchronize math, one session timeline) · reference ',
+          h('span', { class: 'accent' }, (ref || longest) ? basename((ref || longest).rel) : '—'))),
+      h('div', { class: 'row' },
+        this.runBtn = h('button', { class: 'btn primary big', onclick: () => this.run() }),
+        manual ? h('div', { class: 'toggle', onclick: () => { this.resyncManual = !this.resyncManual; this.render(); } },
+          h('span', { class: `check ${this.resyncManual ? 'on' : ''}` }, icon('check')), `re-sync ${manual} manual file(s) too`) : null,
+        h('span', { class: 'note' }, `accept: score ≥ ${st.sync_min_score} · ratio ≥ ${st.sync_min_ratio} @ ${st.sync_sample_rate} Hz (Process › Advanced)`)),
+      this.progress = h('div', { class: 'col', style: { gap: '8px' } }),
+      this.log = h('div', { class: 'log' }));
+    const right = h('div', { class: 'col', style: { gap: '16px' } });
+    right.append(this.offsetsCard(vids));
+    right.append(this.summary(vids));
+    r.append(h('div', { class: 'sync-split' }, this.left, right));
+    this.renderLeftDynamic();
+    this.fetchLog().then(() => this.renderLeftDynamic());
+  },
+  renderLeftDynamic() {
+    if (!this.log || !this.log.isConnected) return;
+    const j = this.job();
+    const active = activeJob('sync');
+    this.runBtn.innerHTML = '';
+    this.runBtn.append(...(active ? [icon('xmark'), 'Cancel'] : [icon('wave-square'), S.data.state.synced_at ? 'Sync again' : 'Run sync']));
+    this.progress.innerHTML = '';
+    if (j) {
+      const pct = Math.round(j.progress * 100);
+      this.progress.append(
+        h('div', { class: 'progress-label' }, h('span', null, active ? (j.message || 'starting…') : j.status), h('span', null, `${pct}%`)),
+        h('div', { class: `progress ${j.status === 'done' ? 'done' : ''}` }, h('div', { style: { width: `${pct}%` } })));
+    }
+    const lines = j ? (jobLogs.get(j.id)?.lines || []) : [];
+    this.log.innerHTML = '';
+    if (!lines.length) {
+      this.log.append(h('span', { class: 'dim' }, j ? '…' : '$ press Run sync — every clip gets correlated against the longest file with audio, then against whatever got placed in the previous pass.'));
+    }
+    for (const l of lines) {
+      const cls = l.msg.startsWith('done') ? 'l-done' : `l-${l.level}`;
+      this.log.append(h('span', { class: cls }, l.msg));
+    }
+    this.log.scrollTop = this.log.scrollHeight;
+  },
+  async run() {
+    const active = activeJob('sync');
+    if (active) { cancelJob(active.id); return; }
+    await startJob('/sync', { resync_manual: this.resyncManual });
+    this.renderLeftDynamic();
+  },
+  offsetsCard(vids) {
+    const card = h('div', { class: 'card', style: { gap: '4px' } }, h('span', { class: 'card-title' }, 'Offsets'));
+    const groups = [...S.data.cameras.map((c) => [c, vids.filter((f) => f.camera === c.id)]),
+      [{ name: 'unassigned' }, vids.filter((f) => !cameraById(f.camera))]];
+    for (const [cam, files] of groups) {
+      if (!files.length) continue;
+      card.append(h('div', { class: 'offsets' }, h('span', { class: 'cam-h' }, cam.name),
+        files.sort((a, b) => (a.offset ?? 1e12) - (b.offset ?? 1e12)).map((f) => {
+          const m = f.offset == null ? 'none' : (f.sync?.method || 'none');
+          const conf = f.sync?.score != null ? `${f.sync.score.toFixed(2)} · ${f.sync.ratio != null ? f.sync.ratio.toFixed(1) : '–'}×` : m === 'reference' ? 'ref' : m;
+          return h('div', { class: 'offrow', title: `${f.rel} — ${METHOD_LABEL[m]}${f.sync?.via ? ` (${f.sync.via})` : ''}` },
+            h('span', { class: 'dot', style: { background: METHOD_COLORS[m] } }),
+            h('span', { class: 'ellipsis' }, basename(f.rel)),
+            h('span', { class: 'val' }, f.offset != null ? fmtOffset(f.offset) : '—'),
+            h('span', { class: 'conf' }, conf));
+        })));
+    }
+    card.append(h('div', { class: 'legend', style: { paddingTop: '10px' } },
+      Object.entries(METHOD_LABEL).map(([k, v]) => h('span', null, h('span', { class: 'dot', style: { background: METHOD_COLORS[k] } }), v))));
+    return card;
+  },
+  summary(vids) {
+    if (!S.data.state.synced_at) return h('div', { class: 'note' }, 'Offsets above are provisional (creation time). Run sync to place clips by audio.');
+    const meta = vids.filter((f) => f.sync?.method === 'metadata');
+    const none = vids.filter((f) => f.offset == null || f.sync?.method === 'none');
+    const good = vids.length - meta.length - none.length;
+    const allGood = !meta.length && !none.length;
+    return h('div', { class: 'card', style: { flexDirection: 'row', alignItems: 'center', gap: '14px', padding: '16px 20px' } },
+      h('img', { src: `/static/assets/${allGood ? 'success-sign-green' : 'warning-sign-orange'}.svg`, alt: '', style: { width: '28px', height: '28px' } }),
+      h('span', { style: { flex: 1, fontSize: '13px', lineHeight: 1.5 } },
+        allGood ? `All ${vids.length} clips aligned.` : `${good}/${vids.length} clips aligned by audio.`,
+        meta.length ? h('span', { class: 'warn' }, ` ${meta.length} placed by metadata — check them on the timeline.`) : null,
+        none.length ? h('span', { class: 'err' }, ` ${none.length} unplaced.`) : null),
+      h('button', { class: 'btn primary', onclick: () => go('review') }, 'Open timeline', icon('arrow-right')));
+  },
+};
+screens.sync = SyncScreen;
+
+// ------------------------------------------------------------------ Review & export screen
+const SPEEDS = [0.25, 0.5, 1, 2];
+const METHOD_LABEL = {
+  reference: 'reference', audio: 'audio match', metadata: 'metadata (check)', none: 'unplaced', manual: 'manual',
+};
+const clone = (x) => JSON.parse(JSON.stringify(x));
+
+function sessionSpan() {
+  let end = 0;
+  for (const f of videoFiles()) if (f.offset != null) end = Math.max(end, f.offset + (f.probe.duration || 0));
+  return end || 60;
+}
+
+/** Which file covers each camera for a take, and how much padding it needs. */
+export function takeCoverage(tk, camIds) {
+  const fps = fpsFloat(targetFps()) || 30;
+  return camIds.map((cid) => {
+    const cam = cameraById(cid);
+    let best = null;
+    let bestOv = 0;
+    for (const f of videoFiles()) {
+      if (f.camera !== cid || f.offset == null) continue;
+      const ov = Math.min(tk.end, f.offset + f.probe.duration) - Math.max(tk.start, f.offset);
+      if (ov > bestOv) { bestOv = ov; best = f; }
+    }
+    if (!best) return { cam, missing: true };
+    const pre = Math.max(0, best.offset - tk.start);
+    const post = Math.max(0, tk.end - (best.offset + best.probe.duration));
+    return { cam, file: best, pre, post, padded: pre > 0.5 / fps || post > 0.5 / fps };
+  });
+}
+
+function coverageText(cov) {
+  const missing = cov.filter((c) => c.missing).map((c) => c.cam?.name || '?');
+  const padded = cov.filter((c) => !c.missing && c.padded).map((c) => `${c.cam?.name} +${(c.pre + c.post).toFixed(1)}s pad`);
+  const ok = cov.length - missing.length;
+  if (!missing.length && !padded.length) return { ok: true, text: `${ok}/${cov.length} cams` };
+  return { ok: false, text: [`${ok}/${cov.length} cams`, ...missing.map((m) => `${m} missing`), ...padded].join(' · ') };
+}
+
+const RV = {
+  t: 0, playing: false, speed: 1, sel: null, pendingIn: null, pendingOut: null,
+  takes: [], committed: [], undo: [], takesDirty: false, takesSaving: false,
+  pendingOffsets: new Map(), opts: null, optsDirty: false, advOpen: false,
+};
+
+const ReviewScreen = {
+  mount(root) {
+    this.side = h('aside', { class: 'side' });
+    this.gridEl = h('div', { class: 'grid' });
+    this.insp = h('aside', { class: 'inspector' });
+    this.transport = h('div', { class: 'transport' });
+    this.tlEl = h('div', { class: 'timeline' });
+    root.append(h('div', { class: 'review' },
+      this.side,
+      h('div', { class: 'rv-main' },
+        h('div', { class: 'stage' }, this.gridEl, this.insp),
+        this.transport,
+        h('div', { style: { overflowY: 'auto', maxHeight: '46vh', flexShrink: '0' } }, this.tlEl))));
+    this.grid = new Grid(this.gridEl, { files: (cid) => (this.gridFiles && this.gridFiles.get(cid)) || [] });
+    this.timeline = new Timeline(this.tlEl, {
+      onScrub: (t) => { if (RV.playing) this.stop(); this.seek(t); },
+      onSelect: (sel) => this.select(sel),
+      onTakesChanged: (final) => (final ? this.commitTakes() : this.renderSideSoon()),
+      onCreateTake: (a, b) => this.createTake(a, b),
+      onRenameTake: (id, name) => this.renameTake(id, name),
+      loadWave: (entry) => {
+        const f = fileById(entry.id);
+        return f ? fetch(mediaUrl('wave', f, 'json')).then((r) => (r.ok ? r.json() : null)) : Promise.resolve(null);
+      },
+    });
+    this.onKey = (e) => this.key(e);
+    window.addEventListener('keydown', this.onKey);
+    this.adopt(true);
+    this.renderAll();
+  },
+  unmount() {
+    this.stop();
+    this.saveTakes(true);
+    this.flushOffsets(true);
+    this.saveOpts(true);
+    window.removeEventListener('keydown', this.onKey);
+    this.grid.destroy();
+    this.timeline.destroy();
+  },
+  sessionChanged() {
+    this.stop();
+    this.saveTakes(true);
+    this.flushOffsets(true);
+    Object.assign(RV, { t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [], takesDirty: false, opts: null });
+  },
+  update() {
+    this.adopt(false);
+    this.renderAll();
+  },
+  onJobs() {
+    this.renderSideFoot();
+    this.renderTransportButtons();
+  },
+
+  // ---------------------------------------------------------------- data
+  adopt(force) {
+    if (!S.data) return;
+    if (force || (!RV.takesDirty && !RV.takesSaving)) {
+      RV.takes = clone(S.data.takes || []);
+      RV.committed = clone(RV.takes);
+    }
+    for (const [fid, off] of RV.pendingOffsets) {
+      const f = fileById(fid);
+      if (f) { f.offset = off; f.sync = { ...(f.sync || {}), method: 'manual' }; }
+    }
+    if (force || !RV.optsDirty) {
+      RV.opts = clone(S.data.export_options || {});
+      if (!Array.isArray(RV.opts.camera_ids)) RV.opts.camera_ids = S.data.cameras.filter((c) => c.include).map((c) => c.id);
+    }
+    if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
+    if (RV.sel && RV.sel.kind === 'file' && !fileById(RV.sel.id)) RV.sel = null;
+    const key = `audio.${S.name}`;
+    if (RV.audioCam === undefined || RV.audioKey !== key) {
+      RV.audioKey = key;
+      const ref = videoFiles().find((f) => f.sync?.method === 'reference');
+      RV.audioCam = prefs.get(key, ref ? ref.camera : (S.data.cameras[0] || {}).id || null);
+    }
+    RV.t = Math.min(RV.t, sessionSpan());
+  },
+  buildGridFiles() {
+    this.gridFiles = new Map();
+    for (const f of videoFiles()) {
+      if (f.offset == null) continue;
+      const v = f.probe.video;
+      const entry = {
+        id: f.id, rel: f.rel, start: f.offset, dur: f.probe.duration, fps: fpsFloat(v.nominal_fps),
+        dw: v.display_width, dh: v.display_height,
+        proxyUrl: f.assets.proxy ? `${mediaUrl('proxy', f, 'mp4')}&s=${f.assets.proxy_size || ''}` : null,
+        thumbUrl: f.assets.thumb ? mediaUrl('thumb', f, 'jpg') : null,
+      };
+      if (!this.gridFiles.has(f.camera)) this.gridFiles.set(f.camera, []);
+      this.gridFiles.get(f.camera).push(entry);
+    }
+  },
+  model() {
+    const files = videoFiles().filter((f) => f.offset != null);
+    const entry = (f) => ({
+      id: f.id, start: f.offset, dur: f.probe.duration, method: f.sync?.method || 'none',
+      label: basename(f.rel), wave: !!f.assets.wave, waveKey: `${f.id}:${f.mtime}`,
+    });
+    const lanes = S.data.cameras.map((c) => ({
+      id: c.id, name: c.name, excluded: !c.include, files: files.filter((f) => f.camera === c.id).map(entry),
+    }));
+    const orphans = files.filter((f) => !cameraById(f.camera));
+    if (orphans.length) lanes.push({ id: '_', name: 'unassigned', files: orphans.map(entry) });
+    return {
+      lanes, takes: RV.takes, span: sessionSpan(), fps: fpsFloat(targetFps()) || 30,
+      selected: RV.sel, pendingIn: RV.pendingIn, pendingOut: RV.pendingOut,
+    };
+  },
+  refreshTimeline() {
+    this.timeline.setModel(this.model());
+  },
+  renderAll() {
+    if (!S.data) return;
+    this.buildGridFiles();
+    this.grid.setCameras(S.data.cameras.filter((c) => c.include));
+    this.grid.setAudio(RV.audioCam);
+    if (RV.playing) this.grid.tick(RV.t);
+    else this.grid.show(RV.t);
+    this.refreshTimeline();
+    this.timeline.setPlayhead(RV.t);
+    this.renderSide();
+    this.renderInspector();
+    this.renderTransport();
+  },
+
+  // ---------------------------------------------------------------- transport
+  seek(t) {
+    RV.t = Math.max(0, Math.min(sessionSpan(), t));
+    if (RV.playing) this.grid.tick(RV.t);
+    else this.grid.show(RV.t);
+    this.timeline.setPlayhead(RV.t);
+    this.updateClock();
+  },
+  play() {
+    if (RV.playing) return;
+    const span = sessionSpan();
+    if (RV.t >= span - 0.01) RV.t = 0;
+    RV.playing = true;
+    this.grid.play(RV.t, RV.speed);
+    this.last = performance.now();
+    const loop = (now) => {
+      if (!RV.playing) return;
+      RV.t = Math.min(span, RV.t + ((now - this.last) / 1000) * RV.speed);
+      this.last = now;
+      this.grid.tick(RV.t);
+      this.timeline.setPlayhead(RV.t);
+      this.updateClock();
+      if (RV.t >= span) this.stop();
+      else this.raf = requestAnimationFrame(loop);
+    };
+    this.raf = requestAnimationFrame(loop);
+    this.renderTransportButtons();
+  },
+  stop() {
+    if (!RV.playing) return;
+    RV.playing = false;
+    cancelAnimationFrame(this.raf);
+    this.grid.pause(RV.t);
+    this.renderTransportButtons();
+  },
+  toggle() { if (RV.playing) this.stop(); else this.play(); },
+  step(d) {
+    if (RV.playing) this.stop();
+    const fps = fpsFloat(targetFps()) || 30;
+    this.seek(Math.round((RV.t + d) * fps) / fps);
+  },
+  jumpTake(dir) {
+    const sorted = [...RV.takes].sort((a, b) => a.start - b.start);
+    const c = dir > 0 ? sorted.find((t) => t.start > RV.t + 0.01) : [...sorted].reverse().find((t) => t.start < RV.t - 0.5);
+    if (c) { this.select({ kind: 'take', id: c.id }); this.seek(c.start); }
+  },
+  updateClock() {
+    if (!this.tcEl) return;
+    const fps = targetFps();
+    this.tcEl.textContent = fmtTC(RV.t, fps);
+    this.frEl.textContent = `frame ${Math.floor(RV.t * fpsFloat(fps) + 1e-6)} @ ${fpsLabel(fps)}`;
+  },
+  renderTransport() {
+    const T = this.transport;
+    T.innerHTML = '';
+    this.playBtn = h('button', { class: 'tb play', title: 'Play / pause [space]', onclick: () => this.toggle() });
+    this.tcEl = h('span', { class: 'tc' });
+    this.frEl = h('span', { class: 'fr' });
+    this.syncBtn = h('button', { class: 'tb', title: 'Place every clip on the timeline by audio', onclick: () => this.runSync() }, icon('wave-square'), 'Sync');
+    this.autoBtn = h('button', { class: 'tb', title: 'Propose takes from clip clusters', onclick: () => this.autoTakes() }, icon('wand-magic-sparkles'), 'Auto-detect takes');
+    this.addBtn = h('button', { class: 'tb', title: 'Create a take from the I/O marks [N]', onclick: () => this.createFromPending() }, icon('plus'), 'Add take', h('kbd', null, 'N'));
+    const cams = S.data.cameras.filter((c) => c.include);
+    T.append(
+      h('div', { class: 'grp' },
+        h('button', { class: 'tb sq', title: 'Previous take', onclick: () => this.jumpTake(-1) }, icon('backward-step')),
+        this.playBtn,
+        h('button', { class: 'tb sq', title: 'Next take', onclick: () => this.jumpTake(1) }, icon('forward-step'))),
+      this.tcEl, this.frEl,
+      h('div', { class: 'grp' }, this.syncBtn, this.autoBtn,
+        h('button', { class: 'tb', title: 'Fit the whole session [F]', onclick: () => this.timeline.fit() }, icon('arrows-left-right-to-line'), 'Fit')),
+      h('span', { class: 'spacer' }),
+      h('select', {
+        title: 'Audio from', onchange: (e) => {
+          RV.audioCam = e.target.value || null;
+          prefs.set(RV.audioKey, RV.audioCam);
+          this.grid.setAudio(RV.audioCam);
+        },
+      }, h('option', { value: '' }, 'audio: muted'),
+      cams.map((c) => h('option', { value: c.id, selected: c.id === RV.audioCam }, `audio: ${c.name}`))),
+      h('div', { class: 'grp' },
+        h('button', { class: `tb ${RV.pendingIn != null ? 'on' : ''}`, title: 'Mark in [I]', onclick: () => this.markIn() }, icon('arrow-right-to-bracket'), 'Mark in', h('kbd', null, 'I')),
+        h('button', { class: `tb ${RV.pendingOut != null ? 'on' : ''}`, title: 'Mark out [O]', onclick: () => this.markOut() }, 'Mark out', h('kbd', null, 'O'), icon('arrow-right-from-bracket')),
+        this.addBtn),
+      h('button', {
+        class: 'tb', title: 'Playback speed', style: { minWidth: '56px', justifyContent: 'center' },
+        onclick: () => {
+          RV.speed = SPEEDS[(SPEEDS.indexOf(RV.speed) + 1) % SPEEDS.length];
+          this.grid.setSpeed(RV.speed);
+          this.renderTransport();
+        },
+      }, `${RV.speed}×`));
+    this.renderTransportButtons();
+    this.updateClock();
+  },
+  renderTransportButtons() {
+    if (!this.playBtn) return;
+    this.playBtn.innerHTML = '';
+    this.playBtn.append(icon(RV.playing ? 'pause' : 'play'));
+    this.syncBtn.disabled = !!activeJob('sync');
+    this.addBtn.hidden = !(RV.pendingIn != null && RV.pendingOut != null && !RV.sel);
+  },
+
+  // ---------------------------------------------------------------- selection
+  select(sel) {
+    RV.sel = sel;
+    if (sel) RV.pendingIn = RV.pendingOut = null;
+    this.refreshTimeline();
+    this.renderSide();
+    this.renderInspector();
+    this.renderTransport();
+  },
+
+  // ---------------------------------------------------------------- keys
+  key(e) {
+    if (S.step !== 'review') return;
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+    if (document.getElementById('modal-root').childElementCount) return;
+    const fps = fpsFloat(targetFps()) || 30;
+    const k = e.key;
+    if (k === ' ') { e.preventDefault(); this.toggle(); }
+    else if (k === 'ArrowLeft' || k === 'ArrowRight') {
+      e.preventDefault();
+      this.step((e.shiftKey ? 1 : 1 / fps) * (k === 'ArrowLeft' ? -1 : 1));
+    } else if (k === 'Home') { e.preventDefault(); this.step(-RV.t); }
+    else if (k === 'End') { e.preventDefault(); if (RV.playing) this.stop(); this.seek(sessionSpan()); }
+    else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === 'z') { e.preventDefault(); this.undoTakes(); }
+    else if (e.ctrlKey || e.metaKey || e.altKey) return;
+    else if (k === 'i' || k === 'I') this.markIn();
+    else if (k === 'o' || k === 'O') this.markOut();
+    else if (k === 'n' || k === 'N') this.createFromPending();
+    else if (k === 'f' || k === 'F') this.timeline.fit();
+    else if (k === 'Delete' || k === 'Backspace') {
+      if (RV.sel && RV.sel.kind === 'take') { e.preventDefault(); this.deleteTake(RV.sel.id); }
+    } else if (k === 'Escape') {
+      RV.pendingIn = RV.pendingOut = null;
+      this.select(null);
+    }
+  },
+
+  // ---------------------------------------------------------------- takes
+  selectedTake() { return RV.sel && RV.sel.kind === 'take' ? RV.takes.find((t) => t.id === RV.sel.id) : null; },
+  markIn() {
+    const fps = fpsFloat(targetFps()) || 30;
+    const tk = this.selectedTake();
+    if (tk) {
+      tk.start = Math.min(RV.t, tk.end - 2 / fps);
+      this.commitTakes();
+      return;
+    }
+    RV.pendingIn = RV.t;
+    if (RV.pendingOut != null && RV.pendingOut <= RV.pendingIn) RV.pendingOut = null;
+    this.refreshTimeline();
+    this.renderTransport();
+  },
+  markOut() {
+    const fps = fpsFloat(targetFps()) || 30;
+    const tk = this.selectedTake();
+    if (tk) {
+      tk.end = Math.max(RV.t, tk.start + 2 / fps);
+      this.commitTakes();
+      return;
+    }
+    if (RV.pendingIn != null && RV.t <= RV.pendingIn) { toast('Out mark must be after the in mark'); return; }
+    RV.pendingOut = RV.t;
+    this.refreshTimeline();
+    this.renderTransport();
+  },
+  createFromPending() {
+    if (RV.pendingIn == null || RV.pendingOut == null || RV.pendingOut <= RV.pendingIn) {
+      toast('Set an in mark (I) and an out mark (O) first');
+      return;
+    }
+    const a = RV.pendingIn;
+    const b = RV.pendingOut;
+    RV.pendingIn = RV.pendingOut = null;
+    this.createTake(a, b);
+  },
+  nextTakeName() {
+    let n = 0;
+    for (const t of RV.takes) {
+      const m = /^take_(\d+)$/.exec(t.name);
+      if (m) n = Math.max(n, Number(m[1]));
+    }
+    return `take_${pad2(Math.max(n, 0) + 1)}`;
+  },
+  createTake(a, b) {
+    const id = nextFree('t', new Set(RV.takes.map((t) => t.id)));
+    RV.takes.push({ id, name: this.nextTakeName(), start: a, end: b, export: true });
+    RV.takes.sort((x, y) => x.start - y.start);
+    RV.sel = { kind: 'take', id };
+    this.commitTakes();
+  },
+  renameTake(id, name) {
+    const tk = RV.takes.find((t) => t.id === id);
+    if (!tk) return;
+    tk.name = name.trim().replace(/\s+/g, '_').slice(0, 80) || tk.name;
+    this.commitTakes();
+  },
+  deleteTake(id) {
+    RV.takes = RV.takes.filter((t) => t.id !== id);
+    if (RV.sel && RV.sel.id === id) RV.sel = null;
+    this.commitTakes();
+    toast('Take deleted — Ctrl+Z to undo');
+  },
+  undoTakes() {
+    if (!RV.undo.length) { toast('Nothing to undo'); return; }
+    RV.takes = RV.undo.pop();
+    RV.committed = clone(RV.takes);
+    if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
+    this.takesChanged();
+  },
+  commitTakes() {
+    RV.takes.sort((x, y) => x.start - y.start);
+    RV.undo.push(RV.committed);
+    if (RV.undo.length > 60) RV.undo.shift();
+    RV.committed = clone(RV.takes);
+    this.takesChanged();
+  },
+  takesChanged() {
+    RV.takesDirty = true;
+    clearTimeout(this.takesTimer);
+    this.takesTimer = setTimeout(() => this.saveTakes(), 400);
+    this.refreshTimeline();
+    this.renderSide();
+    this.renderInspector();
+    this.renderTransport();
+  },
+  async saveTakes(beacon = false) {
+    clearTimeout(this.takesTimer);
+    if (!RV.takesDirty || !S.name) return;
+    RV.takesDirty = false;
+    const body = JSON.stringify(RV.takes);
+    if (beacon) {
+      fetch(sUrl('/takes'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+      return;
+    }
+    RV.takesSaving = true;
+    try {
+      const d = await api('PUT', sUrl('/takes'), JSON.parse(body));
+      S.data.takes = d.takes;
+      S.data.state = d.state;
+    } catch (e) {
+      RV.takesDirty = true;
+      toast(`Couldn't save takes: ${e.message}`, 'error');
+    } finally {
+      RV.takesSaving = false;
+    }
+  },
+  renderSideSoon() {
+    if (this.sideRaf) return;
+    this.sideRaf = requestAnimationFrame(() => {
+      this.sideRaf = null;
+      this.renderSide();
+      this.renderInspector();
+    });
+  },
+  async autoTakes() {
+    if (RV.takes.length) {
+      const ok = await confirmModal({
+        title: 'Replace takes?',
+        body: `Auto-detect proposes takes from clusters of clips. This replaces your ${RV.takes.length} existing take(s) (Ctrl+Z restores them).`,
+        ok: 'Replace takes',
+      });
+      if (!ok) return;
+    }
+    try {
+      await this.saveTakes();
+      const d = await POST(sUrl('/takes/auto'), { replace: true });
+      RV.undo.push(clone(RV.takes));
+      S.data = d;
+      RV.takes = clone(d.takes);
+      RV.committed = clone(RV.takes);
+      RV.sel = null;
+      toast(d.takes.length ? `Found ${d.takes.length} take(s)` : 'No takes found — are clips placed on the timeline?', d.takes.length ? 'ok' : '');
+      this.renderAll();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+
+  // ---------------------------------------------------------------- offsets
+  setOffset(f, off) {
+    off = Math.round(off * 1e6) / 1e6;
+    f.offset = off;
+    if (f.sync?.method !== 'manual') f.sync = { method: 'manual', was: f.sync?.method || 'none' };
+    RV.pendingOffsets.set(f.id, off);
+    clearTimeout(this.offTimer);
+    this.offTimer = setTimeout(() => this.flushOffsets(), 350);
+    this.buildGridFiles();
+    if (RV.playing) this.grid.tick(RV.t); else this.grid.show(RV.t);
+    this.refreshTimeline();
+    this.renderInspector();
+    this.renderSide();
+  },
+  async flushOffsets(beacon = false) {
+    clearTimeout(this.offTimer);
+    const items = [...RV.pendingOffsets.entries()];
+    RV.pendingOffsets.clear();
+    for (const [fid, offset] of items) {
+      const url = sUrl(`/files/${fid}/offset`);
+      if (beacon) {
+        fetch(url, { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ offset }) }).catch(() => {});
+        continue;
+      }
+      try {
+        await PUT(url, { offset });
+      } catch (e) {
+        toast(`Couldn't save offset: ${e.message}`, 'error');
+      }
+    }
+  },
+  async resync(f, refId) {
+    if (!refId) return;
+    try {
+      await this.flushOffsets();
+      const r = await POST(sUrl(`/files/${f.id}/resync`), { ref_fid: refId });
+      toast(`${basename(f.rel)} → ${fmtOffset(r.offset)} (score ${r.score.toFixed(3)}, ratio ${r.ratio.toFixed(2)})${r.accepted ? '' : ' — weak match, check it'}`, r.accepted ? 'ok' : '');
+      await refreshSession();
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  async runSync() {
+    await this.flushOffsets();
+    await this.saveTakes();
+    await startJob('/sync', { resync_manual: false });
+  },
+
+  // ---------------------------------------------------------------- export sidebar (left)
+  renderSide() {
+    const A = this.side;
+    A.innerHTML = '';
+    const open = prefs.get('side', true);
+    A.className = `side ${open ? '' : 'collapsed'}`;
+    if (!open) {
+      A.append(h('button', { class: 'side-expand', title: 'Expand sidebar', onclick: () => { prefs.set('side', true); this.renderSide(); } },
+        icon('angles-right'), h('span', null, 'Takes · Cameras · Export')));
+      return;
+    }
+    const fps = targetFps();
+    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
+    const takes = h('section', null,
+      h('div', { class: 'section-title' }, 'Takes',
+        h('div', { class: 'row', style: { gap: '10px' } },
+          h('span', { class: 'note' }, 'I / O to mark'),
+          h('button', { class: 'mini-btn', title: 'Collapse sidebar', onclick: () => { prefs.set('side', false); this.renderSide(); } }, icon('angles-left')))));
+    if (!RV.takes.length) {
+      takes.append(h('div', { class: 'note', style: { lineHeight: '1.5' } },
+        'No takes yet. Drag in the takes row, mark I / O and press N, or use Auto-detect takes.'));
+    }
+    for (const tk of RV.takes) {
+      const sel = RV.sel && RV.sel.kind === 'take' && RV.sel.id === tk.id;
+      const cov = coverageText(takeCoverage(tk, camIds));
+      takes.append(h('div', {
+        class: `take-row ${sel ? 'sel' : ''}`,
+        onclick: () => { this.select({ kind: 'take', id: tk.id }); if (RV.playing) this.stop(); this.seek(tk.start); },
+      },
+      h('div', { class: 'top' },
+        h('span', {
+          class: `check ${tk.export ? 'on' : ''}`, title: 'Export this take',
+          onclick: (e) => { e.stopPropagation(); tk.export = !tk.export; this.commitTakes(); },
+        }, icon('check')),
+        h('input', {
+          class: 'input ghost', value: tk.name, spellcheck: 'false',
+          onclick: (e) => e.stopPropagation(),
+          onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); },
+          onchange: (e) => this.renameTake(tk.id, e.target.value),
+        }),
+        h('button', { class: 'x', title: 'Delete take', onclick: (e) => { e.stopPropagation(); this.deleteTake(tk.id); } }, icon('xmark'))),
+      h('span', { class: 'sub' }, `${fmtTC(tk.start, fps)} → ${fmtTC(tk.end, fps)} · ${(tk.end - tk.start).toFixed(1)}s`),
+      h('span', { class: `cov ${cov.ok ? 'ok' : 'warn'}` }, cov.text)));
+    }
+
+    const cams = h('section', null, h('span', { class: 'section-title' }, 'Cameras'));
+    for (const c of S.data.cameras) {
+      const on = camIds.includes(c.id);
+      cams.append(h('div', {
+        class: 'cam-row', onclick: () => {
+          RV.opts.camera_ids = on ? camIds.filter((x) => x !== c.id) : S.data.cameras.map((x) => x.id).filter((x) => x === c.id || camIds.includes(x));
+          this.optsChanged();
+        },
+      }, h('span', { class: `check ${on ? 'on' : ''}` }, icon('check')),
+      h('span', { style: { flex: 1 }, class: 'ellipsis' }, c.name),
+      h('span', { class: 'note' }, `${c.rotation}°`)));
+    }
+
+    const o = RV.opts;
+    const seg = (key, values, label = (v) => String(v)) => h('div', { class: 'seg' },
+      values.map((v) => h('button', { class: o[key] === v ? 'on' : '', onclick: () => { o[key] = v; this.optsChanged(); } }, label(v))));
+    const q = o.encoder === 'h264_nvenc' ? `cq ${Number(o.crf) + 2}` : `crf ${o.crf}`;
+    const out = h('section', null,
+      h('span', { class: 'section-title' }, 'Output'),
+      h('div', { class: 'col', style: { gap: '6px', fontSize: '11px', color: 'var(--fg-2)' } }, 'Encoder',
+        seg('encoder', ['libx264', 'h264_nvenc']),
+        h('span', { class: 'note' }, `h264 · ${q} · yuv420p · ${fpsLabel(fps)} fps · ${o.long_side ? `${o.long_side}px long side` : 'source size'}`)),
+      h('button', { class: 'adv-toggle', onclick: () => { RV.advOpen = !RV.advOpen; this.renderSide(); } },
+        icon(RV.advOpen ? 'chevron-down' : 'chevron-right'), 'Advanced'),
+      RV.advOpen ? h('div', { class: 'col' },
+        h('label', { class: 'kv' }, 'Target fps', h('span', null, `${fpsLabel(fps)} (session)`)),
+        h('div', { class: 'kv' }, 'Long side', seg('long_side', [0, 1920, 1280, 1080], (v) => (v ? String(v) : 'keep'))),
+        h('label', { class: 'kv' }, o.encoder === 'h264_nvenc' ? 'CQ (−2)' : 'CRF',
+          h('input', { class: 'input sm', type: 'number', min: '0', max: '51', value: o.crf, onchange: (e) => { o.crf = Math.max(0, Math.min(51, Number(e.target.value) || 17)); this.optsChanged(); } })),
+        h('div', { class: 'kv' }, 'Layout', seg('layout', ['freemocap', 'flat'])),
+        h('div', { class: 'toggle', onclick: () => { o.audio = !o.audio; this.optsChanged(); } },
+          h('span', { class: `check ${o.audio ? 'on' : ''}` }, icon('check')), 'include audio'),
+        h('div', { class: 'toggle', onclick: () => { o.overwrite = !o.overwrite; this.optsChanged(); } },
+          h('span', { class: `check ${o.overwrite ? 'on' : ''}` }, icon('check')), 'overwrite existing files')) : null,
+      this.tree(camIds));
+    const scroll = h('div', { class: 'side-scroll' }, takes, cams, out);
+    this.foot = h('div', { class: 'side-foot' });
+    A.append(scroll, this.foot);
+    this.renderSideFoot();
+  },
+  tree(camIds) {
+    const lines = [{ t: `sessions/${S.name}/`, c: '#d3d3d3' }, { t: `├ source/  (${S.data.files.length} files, untouched)`, c: '#7a7a7a' }, { t: '└ output/', c: '#f1f1f1' }];
+    const takes = RV.takes.filter((t) => t.export);
+    const cams = camIds.map((id) => cameraById(id)).filter(Boolean);
+    const fm = RV.opts.layout !== 'flat';
+    takes.forEach((tk, i) => {
+      const last = i === takes.length - 1;
+      const bar = last ? ' ' : '│';
+      lines.push({ t: `  ${last ? '└' : '├'} ${tk.name}/`, c: '#f1f1f1' });
+      if (fm) lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' }, { t: `  ${bar} └ synchronized_videos/`, c: '#d3d3d3' });
+      else lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' });
+      cams.forEach((c, j) => {
+        const lastC = j === cams.length - 1;
+        lines.push({ t: `  ${bar} ${fm ? '  ' : ''}${lastC ? '└' : '├'} ${c.name}_synced.mp4`, c: '#E89768' });
+      });
+    });
+    if (!takes.length || !cams.length) lines.push({ t: '    (nothing selected)', c: '#7a7a7a' });
+    return h('div', { class: 'tree' }, lines.map((l) => h('span', { style: { color: l.c } }, l.t)));
+  },
+  renderSideFoot() {
+    const F = this.foot;
+    if (!F || !F.isConnected) return;
+    F.innerHTML = '';
+    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
+    const takes = RV.takes.filter((t) => t.export);
+    const n = takes.length * camIds.length;
+    const job = activeJob('export');
+    const last = lastJob('export');
+    if (job) {
+      F.append(h('div', { class: 'col', style: { gap: '6px' } },
+        h('div', { class: 'progress-label' }, h('span', { class: 'ellipsis' }, job.message || 'starting…'), h('span', null, `${Math.round(job.progress * 100)}%`)),
+        h('div', { class: 'progress thin' }, h('div', { style: { width: `${job.progress * 100}%` } }))));
+    } else if (last && last.status !== 'running') {
+      const ok = last.status === 'done' && !(last.result && last.result.errors);
+      F.append(h('div', { class: 'col', style: { gap: '6px' } },
+        h('div', { class: 'progress-label' },
+          h('span', { class: ok ? 'ok' : 'warn' }, last.status === 'done'
+            ? (last.result && last.result.errors ? `done with ${last.result.errors} error(s) — see job log` : `wrote ${last.result ? last.result.written : ''} files`)
+            : last.status),
+          h('a', { href: '#', onclick: (e) => { e.preventDefault(); reveal('output'); } }, 'Open output folder')),
+        h('div', { class: `progress thin ${ok ? 'done' : ''}` }, h('div', { style: { width: '100%' } }))));
+    }
+    F.append(job
+      ? h('button', { class: 'btn primary', onclick: () => cancelJob(job.id) }, icon('xmark'), 'Cancel export')
+      : h('button', { class: 'btn primary', disabled: !n, onclick: () => this.exportNow() }, icon('file-export'),
+        n ? `Export ${n} file${n === 1 ? '' : 's'}` : 'Nothing to export'));
+  },
+  optsChanged() {
+    RV.optsDirty = true;
+    clearTimeout(this.optsTimer);
+    this.optsTimer = setTimeout(() => this.saveOpts(), 500);
+    this.renderSide();
+  },
+  async saveOpts(beacon = false) {
+    clearTimeout(this.optsTimer);
+    if (!RV.optsDirty || !S.name) return;
+    RV.optsDirty = false;
+    const body = JSON.stringify(RV.opts);
+    if (beacon) {
+      fetch(sUrl('/export_options'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+      return;
+    }
+    try {
+      const d = await api('PUT', sUrl('/export_options'), JSON.parse(body));
+      S.data.export_options = d.export_options;
+    } catch (e) { toast(e.message, 'error'); }
+  },
+  async exportNow() {
+    await this.saveTakes();
+    await this.flushOffsets();
+    await this.saveOpts();
+    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
+    const takeIds = RV.takes.filter((t) => t.export).map((t) => t.id);
+    const job = await startJob('/export', { take_ids: takeIds, camera_ids: camIds, options: RV.opts });
+    if (job) this.renderSideFoot();
+  },
+
+  // ---------------------------------------------------------------- inspector (right)
+  renderInspector() {
+    const I = this.insp;
+    I.innerHTML = '';
+    const open = prefs.get('insp', true);
+    I.className = `inspector ${open ? '' : 'collapsed'}`;
+    if (!open) {
+      I.append(h('button', { class: 'side-expand', title: 'Show inspector', onclick: () => { prefs.set('insp', true); this.renderInspector(); this.grid.layout(); } },
+        icon('angles-left'), h('span', null, 'Inspector')));
+      return;
+    }
+    const collapse = h('button', { class: 'mini-btn', title: 'Hide inspector', onclick: () => { prefs.set('insp', false); this.renderInspector(); setTimeout(() => this.grid.layout(), 320); } }, icon('angles-right'));
+    const sel = RV.sel;
+    if (sel && sel.kind === 'file' && fileById(sel.id)) this.inspFile(I, fileById(sel.id), collapse);
+    else if (sel && sel.kind === 'take' && this.selectedTake()) this.inspTake(I, this.selectedTake(), collapse);
+    else this.inspSession(I, collapse);
+  },
+  inspSession(I, collapse) {
+    const vids = videoFiles();
+    const counts = {};
+    for (const f of vids) {
+      const m = f.offset == null ? 'none' : (f.sync?.method || 'none');
+      counts[m] = (counts[m] || 0) + 1;
+    }
+    const st = S.data.state;
+    I.append(h('h3', null, 'Session', collapse),
+      h('div', { class: 'props' },
+        h('span', null, 'name'), h('span', null, S.name),
+        h('span', null, 'files'), h('span', null, `${vids.length}`),
+        h('span', null, 'cameras'), h('span', null, `${S.data.cameras.length} (${S.data.cameras.filter((c) => c.include).length} shown)`),
+        h('span', null, 'length'), h('span', null, fmtClock(sessionSpan())),
+        h('span', null, 'target fps'), h('span', null, `${fpsLabel(targetFps())}`),
+        h('span', null, 'synced'), h('span', { class: st.synced_at ? 'ok' : 'warn' }, st.synced_at ? fmtDate(st.synced_at) : 'not yet — press Sync')),
+      h('div', { class: 'insp-sec' },
+        h('span', { class: 'lbl' }, 'placement'),
+        Object.keys(METHOD_LABEL).filter((m) => counts[m]).map((m) => h('div', { class: 'row', style: { gap: '8px', fontSize: '12px' } },
+          h('span', { class: 'dot sq', style: { background: METHOD_COLORS[m] } }), h('span', { style: { flex: 1 } }, METHOD_LABEL[m]), h('span', { class: 'muted' }, counts[m])))),
+      h('div', { class: 'insp-sec' },
+        h('span', { class: 'lbl' }, 'keys'),
+        h('div', { class: 'note', style: { lineHeight: '1.7', opacity: 0.75 } },
+          'space play · ←/→ frame · shift ±1 s', h('br'), 'I / O in/out · N new take · del delete', h('br'),
+          'home/end · F fit · ctrl+Z undo takes · esc deselect')),
+      h('span', { class: 'note' }, 'Click a clip bar to nudge its offset, or a take to edit it.'));
+  },
+  inspFile(I, f, collapse) {
+    const fps = fpsFloat(targetFps()) || 30;
+    const p = f.probe;
+    const v = p.video;
+    const sync = f.sync || { method: 'none' };
+    const method = f.offset == null ? 'none' : sync.method;
+    const ref = sync.ref ? fileById(sync.ref) : null;
+    const offInput = h('input', {
+      class: 'input sm', type: 'number', step: '0.001', value: f.offset != null ? f.offset.toFixed(3) : '',
+      onchange: (e) => { const v2 = Number(e.target.value); if (isFinite(v2)) this.setOffset(f, v2); },
+    });
+    const nudge = (d) => this.setOffset(f, (f.offset || 0) + d);
+    const candidates = videoFiles().filter((g) => g.id !== f.id && g.offset != null && g.probe.audio);
+    const defRef = (ref && ref.id) || (videoFiles().find((g) => g.sync?.method === 'reference') || candidates[0] || {}).id;
+    const refSel = h('select', { class: 'input sm', style: { flex: 1 } },
+      candidates.map((g) => h('option', { value: g.id, selected: g.id === defRef }, `${cameraById(g.camera)?.name || '?'} · ${basename(g.rel)}`)));
+    I.append(h('h3', null, h('span', { class: 'ellipsis', title: f.rel }, basename(f.rel)), collapse),
+      h('div', { class: 'props' },
+        h('span', null, 'camera'), h('span', null, cameraById(f.camera)?.name || '—'),
+        h('span', null, 'length'), h('span', null, `${fmtDur(p.duration)} · ${v.display_width}×${v.display_height}`),
+        h('span', null, 'fps'), h('span', { class: v.nominal_fps === targetFps() ? '' : 'warn' }, `${fpsLabel(v.nominal_fps)}${v.vfr_suspect ? ' · VFR' : ''}`),
+        h('span', null, 'audio'), h('span', { class: p.audio ? '' : 'warn' }, p.audio ? 'yes' : 'none'),
+        h('span', null, 'created'), h('span', null, fmtDate(p.creation_time)),
+        h('span', null, 'sync'), h('span', { style: { color: METHOD_COLORS[method] } }, METHOD_LABEL[method] + (sync.via ? ` · ${sync.via}` : '')),
+        sync.score != null ? [h('span', null, 'score'), h('span', null, `${sync.score.toFixed(3)} · ratio ${sync.ratio != null ? sync.ratio.toFixed(2) : '—'}`)] : null,
+        ref ? [h('span', null, 'against'), h('span', { title: ref.rel }, basename(ref.rel))] : null),
+      h('div', { class: 'insp-sec' },
+        h('span', { class: 'lbl' }, 'offset (session time of file start, s)'),
+        h('div', { class: 'row', style: { gap: '6px', flexWrap: 'nowrap' } }, offInput,
+          h('button', { class: 'btn xs', title: 'Jump to clip start', onclick: () => this.seek(f.offset || 0) }, icon('arrow-right-to-bracket'))),
+        h('div', { class: 'nudge' },
+          [[-1, '−1 s'], [-10 / fps, '−10 f'], [-1 / fps, '−1 f'], [1 / fps, '+1 f'], [10 / fps, '+10 f'], [1, '+1 s']]
+            .map(([d, l]) => h('button', { onclick: () => nudge(d), title: d > 0 ? 'move clip later' : 'move clip earlier' }, l))),
+        h('span', { class: 'note' }, 'nudging marks the clip as manual; Sync won\'t override it')),
+      h('div', { class: 'insp-sec' },
+        h('span', { class: 'lbl' }, 'Re-sync against…'),
+        p.audio && candidates.length
+          ? h('div', { class: 'row', style: { gap: '6px', flexWrap: 'nowrap' } }, refSel,
+            h('button', { class: 'btn xs', onclick: () => this.resync(f, refSel.value) }, icon('wave-square'), 'Go'))
+          : h('span', { class: 'note' }, p.audio ? 'no other placed file with audio' : 'this file has no audio — nudge it by eye')));
+  },
+  inspTake(I, tk, collapse) {
+    const fps = fpsFloat(targetFps()) || 30;
+    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
+    const cov = takeCoverage(tk, camIds);
+    const num = (key) => h('input', {
+      class: 'input sm', type: 'number', step: (1 / fps).toFixed(4), value: tk[key].toFixed(3),
+      onchange: (e) => {
+        const v2 = Number(e.target.value);
+        if (!isFinite(v2)) return;
+        if (key === 'start') tk.start = Math.min(v2, tk.end - 2 / fps);
+        else tk.end = Math.max(v2, tk.start + 2 / fps);
+        this.commitTakes();
+      },
+    });
+    I.append(h('h3', null,
+      h('input', { class: 'input ghost', value: tk.name, style: { fontWeight: 700, fontSize: '15px', flex: 1 }, onchange: (e) => this.renameTake(tk.id, e.target.value) }),
+      collapse),
+    h('div', { class: 'props' },
+      h('span', null, 'in (s)'), h('div', { class: 'row', style: { gap: '4px', flexWrap: 'nowrap' } }, num('start'), h('button', { class: 'btn xs', title: 'Set in to playhead [I]', onclick: () => this.markIn() }, 'I')),
+      h('span', null, 'out (s)'), h('div', { class: 'row', style: { gap: '4px', flexWrap: 'nowrap' } }, num('end'), h('button', { class: 'btn xs', title: 'Set out to playhead [O]', onclick: () => this.markOut() }, 'O')),
+      h('span', null, 'length'), h('span', null, `${(tk.end - tk.start).toFixed(3)} s`),
+      h('span', null, 'frames'), h('span', null, `${Math.round((tk.end - tk.start) * fps)} @ ${fpsLabel(targetFps())}`),
+      h('span', null, 'export'), h('div', { class: 'toggle', onclick: () => { tk.export = !tk.export; this.commitTakes(); } },
+        h('span', { class: `check ${tk.export ? 'on' : ''}` }, icon('check')), tk.export ? 'yes' : 'no')),
+    h('div', { class: 'insp-sec' },
+      h('span', { class: 'lbl' }, 'coverage'),
+      cov.map((c) => h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', paddingBottom: '6px', borderBottom: '1px solid var(--hairline-soft)' } },
+        h('div', { class: 'row', style: { gap: '8px' } },
+          h('span', { class: 'dot sq', style: { background: c.missing ? '#E56767' : c.padded ? '#E89768' : '#97d47d' } }),
+          h('b', null, c.cam?.name || '?'), h('span', { class: 'spacer' }),
+          h('span', { class: 'muted' }, c.missing ? 'no footage — skipped' : c.padded ? 'padded' : 'full')),
+        c.file ? h('span', { class: 'muted ellipsis', title: c.file.rel }, basename(c.file.rel)) : null,
+        c.file && c.padded ? h('span', { class: 'warn' }, `${c.pre ? `${c.pre.toFixed(2)} s black before` : ''}${c.pre && c.post ? ' · ' : ''}${c.post ? `${c.post.toFixed(2)} s black after` : ''}`) : null))),
+    h('div', { class: 'row', style: { gap: '6px' } },
+      h('button', { class: 'btn sm', onclick: () => this.seek(tk.start) }, icon('backward-step'), 'Go to in'),
+      h('button', { class: 'btn sm', onclick: () => this.seek(tk.end) }, 'Go to out', icon('forward-step')),
+      h('button', { class: 'btn sm danger', onclick: () => this.deleteTake(tk.id) }, icon('trash'), 'Delete')));
+  },
+};
+screens.review = ReviewScreen;
+window.addEventListener('beforeunload', () => {
+  if (mounted === ReviewScreen) {
+    ReviewScreen.saveTakes(true);
+    ReviewScreen.flushOffsets(true);
+    ReviewScreen.saveOpts(true);
+  }
+});
 
 // ------------------------------------------------------------------ placeholder screens (filled in later milestones)
 for (const id of ['cameras', 'sync', 'review']) {

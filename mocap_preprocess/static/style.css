@@ -375,4 +375,4 @@ table.ftable tr:hover td { background: rgba(255,255,255,0.02); }
 .timeline { position: relative; flex-shrink: 0; user-select: none; }
 .timeline canvas { position: absolute; left: 0; top: 0; display: block; }
 .timeline .rename { position: absolute; z-index: 5; font-size: 11px; font-weight: 700; padding: 2px 6px; background: var(--rf-bg-light); border: 1px solid var(--accent); color: var(--fg-1); outline: none; }
-.tl-hint { position: absolute; right: 12px; bottom: 6px; font-size: 10px; color: var(--fg-2); opacity: .45; pointer-events: none; }
+.tl-hint { position: absolute; right: 12px; bottom: 3px; font-size: 10px; color: var(--fg-2); opacity: .45; pointer-events: none; }
