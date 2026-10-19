@@ -36,6 +36,7 @@ DEFAULT_EXPORT_OPTIONS = {
     "crf": 17,
     "audio": True,
     "overwrite": True,
+    "parallel": 1,        # files encoded at once (2-3 help when decoding is the bottleneck, e.g. NVENC)
 }
 
 PROCESS_WORKERS = 3

@@ -156,6 +156,10 @@ in `output/<take>/`.
   window already rules out the far-away look-alikes. W defaults to 1.5 s.
 - **GPU decode** uses `-hwaccel cuda` for proxies and export (falls back to CPU
   if it fails); the **h264_nvenc** encoder is in the export options.
+- **Files at once** (*Output*, 1 by default, up to 3) runs several ffmpegs side
+  by side, across takes. It pays off when decoding is the bottleneck (NVENC, 4K
+  or HEVC phone footage); with libx264 a single ffmpeg already uses every core.
+  Cancel stops all of them.
 - **Long side** (1920 by default) only ever downscales; *keep* exports at source
   resolution.
 

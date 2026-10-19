@@ -9,7 +9,9 @@ and exactly ``N = round(duration × fps)`` frames (R3).
 from __future__ import annotations
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -19,6 +21,7 @@ from .jobs import Job
 from .session_store import SessionStore, now, sanitize_filename, write_json_atomic
 
 ROTATE = {90: "transpose=1", 180: "transpose=1,transpose=1", 270: "transpose=2"}
+MAX_PARALLEL = 3
 
 
 @dataclass
@@ -144,6 +147,10 @@ def normalize_options(options: dict, defaults: dict) -> dict:
     o["long_side"] = int(ls) if ls not in (None, "", "keep", 0, "0") else 0
     o["audio"] = bool(o.get("audio", True))
     o["overwrite"] = bool(o.get("overwrite", True))
+    try:
+        o["parallel"] = max(1, min(MAX_PARALLEL, int(o.get("parallel") or 1)))
+    except (TypeError, ValueError):
+        o["parallel"] = 1
     if "camera_ids" in o and not isinstance(o["camera_ids"], list):
         o.pop("camera_ids")
     return o
@@ -172,14 +179,17 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             k += 1
         used_dirs.add(dname.lower())
         work.append((tk, dname, plans, skipped))
-    units = max(1, sum(len(p) for _, _, p, _ in work))
+    total = max(1, sum(len(p) for _, _, p, _ in work))
+    parallel = options.get("parallel", 1)
     job.log(f"exporting {len(takes)} take(s) × {len(camera_ids)} camera(s) at {ff.fps_label(fps)} fps "
             f"({options['encoder']}, {'crf' if options['encoder'] == 'libx264' else 'cq'} "
             f"{options['crf'] + (2 if options['encoder'] == 'h264_nvenc' else 0)}, "
-            f"{options['long_side'] or 'source'} long side, layout {options['layout']})")
+            f"{options['long_side'] or 'source'} long side, layout {options['layout']}"
+            f"{f', {parallel} files at once' if parallel > 1 else ''})")
 
-    done = written = errors = skipped_n = 0
-    report = []
+    count = {"done": 0, "written": 0, "errors": 0}
+    skipped_n = 0
+    units = []                      # (take, plan, frames) still to encode, in take order
     for tk, dname, plans, skipped in work:
         n = frame_count(tk, fps)
         take_dir = paths.output / dname
@@ -189,59 +199,70 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             job.log(f"{tk['name']}: {s['name']} skipped — {s['reason']}", "warn")
             skipped_n += 1
         for plan in plans:
-            job.check_cancel()
             plan.out = vid_dir / f"{plan.name}_synced.mp4"
-            label = f"{tk['name']} · {plan.name} ({done + 1}/{units})"
-            job.set_progress(done / units, label)
             if max(plan.pre, plan.post) > 0.5 / float(fps):
                 plan.notes.append(f"padded {plan.pre:.3f}s before, {plan.post:.3f}s after")
                 job.log(f"{tk['name']}: {plan.name} padded with {plan.pre:.2f} s black before / {plan.post:.2f} s after", "warn")
             if plan.out.exists() and not options["overwrite"]:
                 plan.status = "kept"
                 job.log(f"{plan.out.name} exists, kept (overwrite off)")
-                done += 1
+                count["done"] += 1
                 continue
-            tmp = plan.out.with_name(plan.out.stem + ".tmp.mp4")
-            src = paths.source_file(plan.file["rel"])
+            units.append((tk, plan, n))
 
-            def prog(x, base=done, label=label):
-                job.set_progress((base + x) / units, label)
+    lock = threading.Lock()
+    running: dict[int, list] = {}   # id(plan) -> [label, fraction]
 
-            ok, err = False, ""
-            for use_hw in ([True, False] if hw else [False]):
-                args = build_command(src, tmp, plan, fps, n, options, use_hw)
-                t0 = time.time()
-                try:
-                    rc, err = ff.run_progress(args, n / float(fps), prog, job.cancel_event)
-                except ff.Cancelled:
-                    tmp.unlink(missing_ok=True)
-                    raise
-                if rc == 0 and tmp.exists():
-                    ok = True
-                    job.log(f"{tk['name']}/{plan.out.name}: encoded in {time.time() - t0:.1f}s")
-                    break
-                if use_hw:
-                    job.log(f"{plan.out.name}: failed with -hwaccel cuda, retrying on CPU", "warn")
-            if not ok:
-                tmp.unlink(missing_ok=True)
-                plan.status = "error"
-                errors += 1
-                job.log(f"{tk['name']}/{plan.out.name}: ffmpeg failed: {err[-400:]}", "error")
-                done += 1
-                continue
-            try:
-                ff.replace_with_retry(tmp, plan.out)
-            except OSError as e:  # e.g. the old file is open in a player
-                tmp.unlink(missing_ok=True)
-                plan.status = "error"
-                errors += 1
-                job.log(f"{tk['name']}/{plan.out.name}: can't replace the existing file ({e}) — is it open somewhere?", "error")
-                done += 1
-                continue
-            plan.status = "written"
-            written += 1
-            done += 1
+    def show():
+        with lock:
+            frac = (count["done"] + sum(f for _, f in running.values())) / total
+            labels = [lab for lab, _ in running.values()]
+            pos = min(total, count["done"] + len(labels))
+        if labels:
+            msg = labels[0] if len(labels) == 1 else f"{len(labels)} at once: " + ", ".join(labels)
+            job.set_progress(frac, f"{msg} ({pos}/{total})")
+        else:
+            job.set_progress(frac)
 
+    def encode(unit) -> None:
+        tk, plan, n = unit
+        job.check_cancel()
+        key = id(plan)
+        with lock:
+            running[key] = [f"{tk['name']} · {plan.name}", 0.0]
+        show()
+
+        def prog(x):
+            with lock:
+                running[key][1] = x
+            show()
+        try:
+            ok = encode_one(tk, plan, n, paths.source_file(plan.file["rel"]), fps, options, hw, prog, job)
+        finally:
+            with lock:
+                running.pop(key, None)
+                count["done"] += 1
+        with lock:
+            count["written" if ok else "errors"] += 1
+        show()
+
+    # one ffmpeg per file; with `parallel` > 1 several run at once, across takes
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        futs = [pool.submit(encode, u) for u in units]
+        try:
+            for fut in as_completed(futs):
+                fut.result()
+        except BaseException:
+            job.cancel_event.set()      # stop the siblings too: their ffmpegs get killed
+            for f in futs:
+                f.cancel()
+            raise
+    written, errors = count["written"], count["errors"]
+
+    report = []
+    for tk, dname, plans, skipped in work:
+        n = frame_count(tk, fps)
+        take_dir = paths.output / dname
         # verify: every output of the take has exactly N frames (R3)
         for plan in plans:
             if plan.out is None or not plan.out.exists():
@@ -279,6 +300,41 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             "error" if errors else "info")
     return {"written": written, "skipped": skipped_n, "errors": errors, "takes": report,
             "output": str(paths.output)}
+
+
+def encode_one(tk: dict, plan: CamPlan, n: int, src: Path, fps: Fraction, options: dict, hw: bool,
+               prog, job: Job) -> bool:
+    """Encode one camera of one take into a temp file, then move it into place."""
+    tmp = plan.out.with_name(plan.out.stem + ".tmp.mp4")
+    ok, err = False, ""
+    for use_hw in ([True, False] if hw else [False]):
+        args = build_command(src, tmp, plan, fps, n, options, use_hw)
+        t0 = time.time()
+        try:
+            rc, err = ff.run_progress(args, n / float(fps), prog, job.cancel_event)
+        except ff.Cancelled:
+            tmp.unlink(missing_ok=True)
+            raise
+        if rc == 0 and tmp.exists():
+            ok = True
+            job.log(f"{tk['name']}/{plan.out.name}: encoded in {time.time() - t0:.1f}s")
+            break
+        if use_hw:
+            job.log(f"{plan.out.name}: failed with -hwaccel cuda, retrying on CPU", "warn")
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        plan.status = "error"
+        job.log(f"{tk['name']}/{plan.out.name}: ffmpeg failed: {err[-400:]}", "error")
+        return False
+    try:
+        ff.replace_with_retry(tmp, plan.out)
+    except OSError as e:  # e.g. the old file is open in a player
+        tmp.unlink(missing_ok=True)
+        plan.status = "error"
+        job.log(f"{tk['name']}/{plan.out.name}: can't replace the existing file ({e}) — is it open somewhere?", "error")
+        return False
+    plan.status = "written"
+    return True
 
 
 def read_take_info(path: Path) -> dict:

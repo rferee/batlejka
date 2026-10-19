@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -44,7 +46,8 @@ def exported(synced):
                 f["offset"] = gt["files"][f["rel"]]["offset"]
                 f["sync"] = {"method": "manual"}
     data = store.load(name)
-    opts = exporter.normalize_options({"long_side": 0, "crf": 23, "overwrite": True}, config.DEFAULT_EXPORT_OPTIONS)
+    # three files at once: everything checked below also covers parallel encoding
+    opts = exporter.normalize_options({"long_side": 0, "crf": 23, "overwrite": True, "parallel": 3}, config.DEFAULT_EXPORT_OPTIONS)
     job = Job("export", name)
     result = exporter.export(store, name, job, [t["id"] for t in data["takes"]], [c["id"] for c in data["cameras"]], opts)
     yield store, name, gt, data, result, job, fuji_cam
@@ -60,6 +63,7 @@ def test_export_completed(exported):
     _, _, _, data, result, job, _ = exported
     assert result["errors"] == 0, [e["msg"] for e in job._log if e["level"] == "error"]
     assert result["written"] == len(data["takes"]) * len(data["cameras"])
+    assert "3 files at once" in job._log[0]["msg"]
 
 
 def test_equal_frame_counts_and_fps(exported):
@@ -135,3 +139,16 @@ def test_flat_layout_and_skip_without_overlap(exported):
     info = ff.video_stream_info(vids[0])
     assert max(info["width"], info["height"]) == 320
     assert len(json.loads((d / "take_info.json").read_text())["skipped"]) == 3
+
+
+def test_parallel_export_cancels_every_file(exported):
+    store, name, _, data, _, _, _ = exported
+    opts = exporter.normalize_options({"layout": "flat", "long_side": 0, "parallel": 3}, config.DEFAULT_EXPORT_OPTIONS)
+    assert exporter.normalize_options({"parallel": 9}, config.DEFAULT_EXPORT_OPTIONS)["parallel"] == exporter.MAX_PARALLEL
+    job = Job("export", name)
+    threading.Timer(0.4, job.cancel_event.set).start()
+    t0 = time.time()
+    with pytest.raises(ff.Cancelled):
+        exporter.export(store, name, job, [t["id"] for t in data["takes"]], [c["id"] for c in data["cameras"]], opts)
+    assert time.time() - t0 < 10
+    assert not list(store.paths(name).output.rglob("*.tmp.mp4"))   # partial files cleaned up
