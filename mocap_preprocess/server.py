@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from . import ffmpeg_tools as ff
-from . import grouping, pipeline
+from . import exporter, grouping, pipeline, syncing
+from . import takes as takes_mod
 from .jobs import JobConflict, JobManager
 from .session_store import (InvalidName, SessionNotFound, SessionStore, validate_fid,
                             validate_session_name)
@@ -235,6 +236,96 @@ def put_cameras(s: str, payload: dict = Body(...)):
         used = {f.get("camera") for f in data["files"]}
         data["cameras"] = [c for c in cams if c["id"] in used]
     return session_view(name)
+
+
+@app.post("/api/sessions/{s}/sync")
+def sync(s: str, payload: dict = Body(default={})):
+    name = _session(s)
+    _require_tools()
+    resync_manual = bool((payload or {}).get("resync_manual", False))
+    job = jobs.start("sync", name, lambda j: syncing.sync_session(store, name, j, resync_manual),
+                     label="Sync by audio")
+    return _job_response(job)
+
+
+@app.put("/api/sessions/{s}/files/{fid}/offset")
+def put_offset(s: str, fid: str, payload: dict = Body(...)):
+    name = _session(s)
+    validate_fid(fid)
+    try:
+        offset = float(payload["offset"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "expected {offset: seconds}")
+    with store.edit(name) as data:
+        f = next((x for x in data["files"] if x["id"] == fid), None)
+        if f is None:
+            raise HTTPException(404, "file not found")
+        prev = f.get("sync") or {}
+        f["offset"] = round(offset, 6)
+        f["sync"] = {"method": "manual", "was": prev.get("was") if prev.get("method") == "manual" else prev.get("method")}
+    return {"id": fid, "offset": f["offset"], "sync": f["sync"]}
+
+
+@app.post("/api/sessions/{s}/files/{fid}/resync")
+def resync(s: str, fid: str, payload: dict = Body(...)):
+    name = _session(s)
+    validate_fid(fid)
+    ref = validate_fid(str((payload or {}).get("ref_fid", "")))
+    if jobs.active(name, "sync"):
+        raise HTTPException(409, "a sync job is running")
+    try:
+        return syncing.resync_file(store, name, fid, ref)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/sessions/{s}/takes")
+def put_takes(s: str, payload: list = Body(...)):
+    name = _session(s)
+    try:
+        clean = takes_mod.validate(payload)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, f"invalid takes: {e}")
+    with store.edit(name) as data:
+        data["takes"] = clean
+    return {"takes": clean, "state": data["state"]}
+
+
+@app.post("/api/sessions/{s}/takes/auto")
+def auto_takes(s: str, payload: dict = Body(default={})):
+    name = _session(s)
+    with store.edit(name) as data:
+        if data["takes"] and not (payload or {}).get("replace"):
+            raise HTTPException(409, "takes already exist; pass {replace: true}")
+        data["takes"] = takes_mod.detect(data)
+    return session_view(name)
+
+
+@app.put("/api/sessions/{s}/export_options")
+def put_export_options(s: str, payload: dict = Body(...)):
+    name = _session(s)
+    with store.edit(name) as data:
+        data["export_options"] = exporter.normalize_options(payload, config.DEFAULT_EXPORT_OPTIONS)
+    return {"export_options": data["export_options"]}
+
+
+@app.post("/api/sessions/{s}/export")
+def export(s: str, payload: dict = Body(...)):
+    name = _session(s)
+    _require_tools()
+    take_ids = [str(x) for x in (payload.get("take_ids") or [])]
+    camera_ids = [str(x) for x in (payload.get("camera_ids") or [])]
+    with store.edit(name) as data:
+        opts = exporter.normalize_options(payload.get("options") or data["export_options"], config.DEFAULT_EXPORT_OPTIONS)
+        opts["camera_ids"] = camera_ids
+        data["export_options"] = opts
+    if not take_ids or not camera_ids:
+        raise HTTPException(400, "select at least one take and one camera")
+    job = jobs.start("export", name, lambda j: exporter.export(store, name, j, take_ids, camera_ids, opts),
+                     label="Export takes")
+    return _job_response(job)
 
 
 @app.post("/api/sessions/{s}/reveal")

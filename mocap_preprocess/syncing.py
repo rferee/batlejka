@@ -314,7 +314,8 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
                 offsets[f["id"]] = off
                 info[f["id"]] = {"method": "audio", "ref": g["id"], "score": round(m.score, 4),
                                  "ratio": round(m.ratio, 3), "pass": pass_no}
-                job.log(f"  {f['rel']} → {off:+.3f} s  (vs {g['rel']}, score {m.score:.3f}, ratio {m.ratio:.2f})")
+                job.log(f"  {f['rel']} → {off - offsets[ref['id']]:+.3f} s from reference start "
+                        f"(vs {g['rel']}, score {m.score:.3f}, ratio {m.ratio:.2f})")
                 layer.append(f)
             pending = [f for f in pending if f["id"] not in found]
             total = done + len(pending) * max(1, len(layer))
@@ -344,7 +345,8 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
                 if f["id"] in best_seen:
                     inf.update(score=round(best_seen[f["id"]][1].score, 4), ratio=round(best_seen[f["id"]][1].ratio, 3))
                 info[f["id"]] = inf
-                job.log(f"  {f['rel']} → {m[0]:+.3f} s by {m[1]} (check manually)", "warn")
+                rel = m[0] - offsets[ref["id"]] if ref is not None else m[0]
+                job.log(f"  {f['rel']} → {rel:+.3f} s by {m[1]} (check manually)", "warn")
     for fid, off in place_after_end(files, offsets).items():
         offsets[fid], info[fid] = off, {"method": "none"}
         job.log(f"  {by_id[fid]['rel']}: no audio match and no creation time — put after the end", "error")
