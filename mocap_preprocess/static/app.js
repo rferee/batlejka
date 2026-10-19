@@ -1503,6 +1503,13 @@ const ReviewScreen = {
     else if (k === 'o' || k === 'O') this.markOut();
     else if (k === 'n' || k === 'N') this.createFromPending();
     else if (k === 'f' || k === 'F') this.timeline.fit();
+    else if (k === 'j' || k === 'J') this.stepTake(-1);
+    else if (k === 'l' || k === 'L') this.stepTake(1);
+    else if (k === 'k' || k === 'K') { if (RV.sel) this.select(null); }
+    else if (k === 'Enter') {
+      const tk = this.selectedTake();
+      if (tk && tag !== 'BUTTON' && tag !== 'A') { e.preventDefault(); this.timeline.startRename(tk); }
+    }
     else if (k === 'Delete' || k === 'Backspace') {
       if (RV.sel && RV.sel.kind === 'take') { e.preventDefault(); this.deleteTake(RV.sel.id); }
     } else if (k === 'Escape') {
@@ -1513,6 +1520,19 @@ const ReviewScreen = {
 
   // ---------------------------------------------------------------- takes
   selectedTake() { return RV.sel && RV.sel.kind === 'take' ? RV.takes.find((t) => t.id === RV.sel.id) : null; },
+  /** J / L: the previous / next take — from the selected one, else from the playhead. */
+  stepTake(dir) {
+    const list = [...RV.takes].sort((a, b) => a.start - b.start);
+    const cur = this.selectedTake();
+    let tk;
+    if (cur) tk = list[list.indexOf(cur) + dir];
+    else if (dir > 0) tk = list.find((t) => t.start > RV.t + 1e-6);
+    else tk = [...list].reverse().find((t) => t.start < RV.t - 1e-6);
+    if (!tk) return;
+    this.select({ kind: 'take', id: tk.id });
+    if (RV.playing) this.stop();
+    this.seek(tk.start);
+  },
   markIn() {
     const fps = fpsFloat(targetFps()) || 30;
     const tk = this.selectedTake();
@@ -1915,7 +1935,7 @@ const ReviewScreen = {
       h('div', { class: 'insp-sec' },
         h('span', { class: 'lbl' }, 'keys'),
         h('div', { class: 'note', style: { lineHeight: '1.7', opacity: 0.75 } },
-          'space play · ←/→ frame · shift ±1 s', h('br'), 'I / O in/out · N new take · del delete', h('br'),
+          'space play · ←/→ frame · shift ±1 s', h('br'), 'I / O in/out · N new take · del delete', h('br'), 'J / L prev/next take · K deselect · enter rename', h('br'),
           'home/end · F fit · ctrl+Z undo takes · esc deselect')),
       h('span', { class: 'note' }, 'Click a clip bar to nudge its offset, or a take to edit it.'));
   },

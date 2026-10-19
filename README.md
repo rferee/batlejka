@@ -119,7 +119,9 @@ The URL (`#/<session>/<step>`) can be bookmarked.
      `calibration`).
    - Keys: Space play/pause · ←/→ one frame · Shift+←/→ one second · I/O set
      in/out (of the selected take, or pending marks) · N new take from marks ·
-     Del delete take · Home/End · F fit · Ctrl+Z undo take edits · Esc deselect.
+     J / L select the previous / next take (from the selected one, else from the
+     playhead) · K deselect · Enter rename the selected take · Del delete take · Home/End · F fit · Ctrl+Z undo
+     take edits · Esc deselect and clear marks.
    - The sidebar shows per-take coverage ("4/4 cams", or which camera is missing
      or will be padded) and a preview of the output tree. **Export** writes one
      folder per take; every file is checked to have exactly

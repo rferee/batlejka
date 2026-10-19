@@ -80,7 +80,7 @@ export class Timeline {
     this.over = document.createElement('canvas');
     this.hint = document.createElement('div');
     this.hint.className = 'tl-hint';
-    this.hint.textContent = 'wheel zoom · shift+wheel pan · drag in takes row to add a take · dbl-click to rename';
+    this.hint.textContent = 'wheel zoom · shift+wheel pan · drag in takes row to add a take · dbl-click or enter to rename';
     container.append(this.base, this.over, this.hint);
     this.bctx = this.base.getContext('2d');
     this.octx = this.over.getContext('2d');
@@ -617,13 +617,15 @@ export class Timeline {
 
   startRename(tk) {
     this.el.querySelector('.rename')?.remove();
-    const x0 = Math.max(LABEL_W, this.x(tk.start));
+    // keep the editor on screen even when the take is scrolled out of view (Enter on a selected take)
+    const w = Math.max(120, Math.min(260, this.x(tk.end) - Math.max(LABEL_W, this.x(tk.start))));
+    const x0 = Math.max(LABEL_W, Math.min(this.x(tk.start), this.w - w - 4));
     const input = document.createElement('input');
     input.className = 'rename';
     input.value = tk.name;
     input.style.left = `${x0}px`;
     input.style.top = `${RULER_H + 2}px`;
-    input.style.width = `${Math.max(120, Math.min(260, this.x(tk.end) - x0))}px`;
+    input.style.width = `${w}px`;
     let done = false;
     const finish = (commit) => {
       if (done) return;
