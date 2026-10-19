@@ -273,12 +273,15 @@ def resync(s: str, fid: str, payload: dict = Body(...)):
     ref = validate_fid(str((payload or {}).get("ref_fid", "")))
     if jobs.active(name, "sync"):
         raise HTTPException(409, "a sync job is running")
-    try:
-        return syncing.resync_file(store, name, fid, ref)
-    except LookupError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+
+    def run(job):
+        job.set_progress(0.1, "correlating")
+        res = syncing.resync_file(store, name, fid, ref)
+        job.log(f"re-sync → {res['offset']:+.3f} s (score {res['score']:.3f}, ratio {res['ratio']:.2f})"
+                + ("" if res["accepted"] else " — weak match, check it"), "info" if res["accepted"] else "warn")
+        return res
+
+    return _job_response(jobs.start("resync", name, run, label="Re-sync file"))
 
 
 @app.put("/api/sessions/{s}/takes")

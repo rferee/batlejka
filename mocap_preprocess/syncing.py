@@ -225,6 +225,25 @@ def place_provisional(data: dict) -> None:
             f["offset"], f["sync"] = after[f["id"]], {"method": "none"}
 
 
+def frame_delta(ref: dict, fresh: dict[str, float], kept: dict[str, float], by_id: dict[str, dict]) -> float:
+    """Shift from the fresh placement frame (reference at 0) into the session's
+    existing frame. Anchor on files whose previous offset was trusted and that
+    were placed again now — preferring the previous reference — so a reference
+    that only had a metadata guess doesn't drag everything by its error."""
+    if ref["id"] in kept:
+        return kept[ref["id"]]
+    anchors = []
+    for fid, off in fresh.items():
+        f = by_id[fid]
+        if fid in kept or f.get("offset") is None or (f.get("sync") or {}).get("method") not in TRUSTED:
+            continue
+        anchors.append((f["sync"]["method"] == "reference", f["offset"] - off))
+    if anchors:
+        prev_ref = [d for is_ref, d in anchors if is_ref]
+        return prev_ref[0] if prev_ref else statistics.median(d for _, d in anchors)
+    return ref["offset"] if ref.get("offset") is not None else 0.0
+
+
 # ---------------------------------------------------------------------------
 # the sync job
 
@@ -263,22 +282,20 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
         if not f["probe"].get("audio"):
             job.log(f"{f['rel']}: no audio track — will be placed by metadata", "warn")
 
-    offsets: dict[str, float] = {}
-    info: dict[str, dict] = {}
+    # Offsets live in the session's existing frame ("old frame"); kept manual
+    # offsets are already in it. The audio placement is computed in a fresh frame
+    # (reference at 0) and moved into the old frame afterwards, so takes and
+    # manual offsets stay attached to the same footage.
+    offsets: dict[str, float] = dict(kept)
+    info: dict[str, dict] = {fid: by_id[fid]["sync"] for fid in kept}
+    fresh: dict[str, float] = {}
     best_seen: dict[str, tuple[str, Match]] = {}
     ref = max(with_audio, key=duration) if with_audio else None
     if ref is not None:
-        # Anchor the new placement on the reference's previous position so that
-        # takes and kept manual offsets stay attached to the same footage.
-        anchor = ref["offset"] if ref.get("offset") is not None else 0.0
-        offsets[ref["id"]] = kept.get(ref["id"], anchor)
-        info[ref["id"]] = ref["sync"] if ref["id"] in kept else {"method": "reference"}
+        fresh[ref["id"]] = 0.0
         job.log(f"reference: {ref['rel']} ({duration(ref):.1f} s)")
-        for fid, off in kept.items():
-            offsets[fid] = off
-            info[fid] = by_id[fid]["sync"]
-        layer = [ref] + [f for f in with_audio if f["id"] in kept and f["id"] != ref["id"]]
-        pending = [f for f in with_audio if f["id"] not in offsets]
+        layer = [ref]
+        pending = [f for f in with_audio if f["id"] != ref["id"] and f["id"] not in kept]
         cs_cache: dict[str, np.ndarray] = {}
         total = max(1, len(pending))
         done = 0
@@ -310,11 +327,11 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
                 if f["id"] not in found:
                     continue
                 g, m = found[f["id"]]
-                off = offsets[g["id"]] + audio_start(g) + m.lag / sr - audio_start(f)
-                offsets[f["id"]] = off
+                off = fresh[g["id"]] + audio_start(g) + m.lag / sr - audio_start(f)
+                fresh[f["id"]] = off
                 info[f["id"]] = {"method": "audio", "ref": g["id"], "score": round(m.score, 4),
                                  "ratio": round(m.ratio, 3), "pass": pass_no}
-                job.log(f"  {f['rel']} → {off - offsets[ref['id']]:+.3f} s from reference start "
+                job.log(f"  {f['rel']} → {off:+.3f} s from reference start "
                         f"(vs {g['rel']}, score {m.score:.3f}, ratio {m.ratio:.2f})")
                 layer.append(f)
             pending = [f for f in pending if f["id"] not in found]
@@ -326,8 +343,14 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
                         f"ratio {seen[1].ratio:.2f} vs {by_id[seen[0]]['rel']})", "warn")
             else:
                 job.log(f"  {f['rel']}: no usable overlap with any placed file", "warn")
+        if ref["id"] not in kept:
+            info[ref["id"]] = {"method": "reference"}
+        delta = frame_delta(ref, fresh, kept, by_id)
+        for fid, off in fresh.items():
+            if fid not in kept:
+                offsets[fid] = off + delta
     else:
-        job.log("no usable audio in this session — placing everything by metadata", "warn")
+        job.log("no usable audio in this session — placing by metadata", "warn")
 
     # 2. fallback: creation time through a placed file's clock
     placed = dict(offsets)
@@ -345,7 +368,7 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
                 if f["id"] in best_seen:
                     inf.update(score=round(best_seen[f["id"]][1].score, 4), ratio=round(best_seen[f["id"]][1].ratio, 3))
                 info[f["id"]] = inf
-                rel = m[0] - offsets[ref["id"]] if ref is not None else m[0]
+                rel = m[0] - offsets[ref["id"]] if ref is not None and ref["id"] in offsets else m[0]
                 job.log(f"  {f['rel']} → {rel:+.3f} s by {m[1]} (check manually)", "warn")
     for fid, off in place_after_end(files, offsets).items():
         offsets[fid], info[fid] = off, {"method": "none"}
@@ -359,7 +382,10 @@ def sync_session(store: SessionStore, name: str, job: Job, resync_manual: bool =
             if f["id"] not in offsets:
                 continue
             if not resync_manual and f["id"] not in kept and f["sync"].get("method") == "manual":
-                continue  # nudged by the user while we were busy
+                # nudged by the user while we were busy: keep it, but move it with everything else
+                if f.get("offset") is not None:
+                    f["offset"] = round(f["offset"] + shift, 6)
+                continue
             f["offset"] = round(offsets[f["id"]] + shift, 6)
             f["sync"] = info[f["id"]]
         if abs(shift) > 1e-9:

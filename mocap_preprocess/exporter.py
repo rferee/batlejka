@@ -229,7 +229,15 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
                 job.log(f"{tk['name']}/{plan.out.name}: ffmpeg failed: {err[-400:]}", "error")
                 done += 1
                 continue
-            ff.replace_with_retry(tmp, plan.out)
+            try:
+                ff.replace_with_retry(tmp, plan.out)
+            except OSError as e:  # e.g. the old file is open in a player
+                tmp.unlink(missing_ok=True)
+                plan.status = "error"
+                errors += 1
+                job.log(f"{tk['name']}/{plan.out.name}: can't replace the existing file ({e}) — is it open somewhere?", "error")
+                done += 1
+                continue
             plan.status = "written"
             written += 1
             done += 1

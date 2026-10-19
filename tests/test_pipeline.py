@@ -64,6 +64,51 @@ def test_auto_takes_match_truth(synced):
         assert got["end"] == pytest.approx(want["end"], abs=0.5)
 
 
+def test_sync_without_audio_keeps_manual_offsets(synced):
+    store, name, gt = synced
+    snapshot = store.load(name)
+    try:
+        with store.edit(name) as d:
+            for f in d["files"]:
+                f["probe"]["audio"] = None          # a session recorded without audio
+            nudged = next(f for f in d["files"] if f["rel"] == "IMG_0102.MOV")
+            nudged["offset"], nudged["sync"] = 7.25, {"method": "manual"}
+        syncing.sync_session(store, name, Job("sync", name))
+        after = files_by_rel(store.load(name))
+        assert after["IMG_0102.MOV"]["sync"]["method"] == "manual"
+        others = [f for rel, f in after.items() if rel != "IMG_0102.MOV"]
+        assert all(f["sync"]["method"] == "metadata" for f in others)
+        # same camera's other clips are placed through the nudged clip's clock
+        a1 = after["IMG_0101.MOV"]
+        ct = {rel: f["probe"]["creation_time"] for rel, f in after.items()}
+        assert a1["offset"] - after["IMG_0102.MOV"]["offset"] == pytest.approx(ct["IMG_0101.MOV"] - ct["IMG_0102.MOV"], abs=1e-3)
+    finally:
+        store.save(name, snapshot)
+
+
+def test_resync_anchors_on_trusted_files_not_a_guessed_reference(synced):
+    store, name, gt = synced
+    snapshot = store.load(name)
+    try:
+        with store.edit(name) as d:
+            d["takes"] = [{"id": "t1", "name": "take_01", "start": 6.0, "end": 12.0, "export": True}]
+            fuji = next(f for f in d["files"] if f["rel"] == "DSCF0001.MOV")
+            fuji["offset"], fuji["sync"] = 3.7, {"method": "metadata"}   # e.g. added later, only a guess
+        before = files_by_rel(store.load(name))
+        syncing.sync_session(store, name, Job("sync", name))
+        data = store.load(name)
+        after = files_by_rel(data)
+        shift = after["IMG_0101.MOV"]["offset"] - before["IMG_0101.MOV"]["offset"]
+        for rel in ("IMG_0102.MOV", "IMG_0201.MOV", "VID_20261019_120044.mp4"):
+            assert after[rel]["offset"] - before[rel]["offset"] == pytest.approx(shift, abs=FRAME)
+        assert data["takes"][0]["start"] == pytest.approx(6.0 + shift, abs=1e-6)  # take moved with the phones
+        assert after["DSCF0001.MOV"]["sync"]["method"] == "reference"
+        assert after["IMG_0101.MOV"]["offset"] - after["DSCF0001.MOV"]["offset"] == pytest.approx(
+            gt["files"]["IMG_0101.MOV"]["offset"], abs=FRAME)
+    finally:
+        store.save(name, snapshot)
+
+
 def test_resync_against_chosen_file_and_manual_kept(synced):
     store, name, gt = synced
     data = store.load(name)

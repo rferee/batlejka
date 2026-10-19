@@ -416,7 +416,13 @@ def run_proxies(store: SessionStore, name: str, job: Job) -> dict:
             tmp.unlink(missing_ok=True)
             failed.add(f["id"])
             continue
-        ff.replace_with_retry(tmp, dst)
+        try:
+            ff.replace_with_retry(tmp, dst)
+        except OSError as e:  # the old proxy is still being streamed somewhere
+            tmp.unlink(missing_ok=True)
+            failed.add(f["id"])
+            job.log(f"{f['rel']}: can't replace the old proxy ({e}); re-run Process to retry", "error")
+            continue
         with store.edit(name) as d:
             for x in d["files"]:
                 if x["id"] == f["id"]:

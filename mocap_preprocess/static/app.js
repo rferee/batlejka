@@ -382,13 +382,14 @@ export function applySession(data) {
 
 export async function openSession(name, { scan = true } = {}) {
   if (name !== S.name) {
+    // flush the old session's pending edits while sUrl() still points at it
+    if (mounted && mounted.sessionChanged) mounted.sessionChanged();
     S.data = null;
     S.jobs = [];
     jobLogs.clear();
   }
   S.name = name;
   prefs.set('session', name);
-  if (mounted && mounted.sessionChanged) mounted.sessionChanged();
   await refreshSession();
   if (scan) await startJob('/scan');
   pollSoon();
@@ -427,7 +428,7 @@ async function pollJobs() {
         if (p && isActive(p) && !isActive(j)) {
           refresh = true;
           if (j.status === 'error') toast(`${j.label} failed: ${j.error}`, 'error');
-          else if (j.status === 'done' && j.kind !== 'proxies' && j.kind !== 'scan') toast(`${j.label} done`, 'ok');
+          else if (j.status === 'done' && !['proxies', 'scan', 'resync'].includes(j.kind)) toast(`${j.label} done`, 'ok');
         }
         if (j.kind === 'proxies' && isActive(j) && p && p.log_seq !== j.log_seq && Date.now() - lastProxyRefresh > 2000) {
           lastProxyRefresh = Date.now();
@@ -742,12 +743,13 @@ const CamerasScreen = {
     clearTimeout(this.timer);
     if (!this.dirty || !S.name) return;
     const body = { cameras: this.cams, assignments: this.assign };
+    const name = S.name;
     this.dirty = false;
     this.saving = true;
     try {
       const d = await PUT(sUrl('/cameras'), body);
       this.saving = false;
-      if (!this.dirty) {
+      if (!this.dirty && S.name === name) {
         S.data = d;
         render();
       }
@@ -1093,7 +1095,7 @@ const ReviewScreen = {
     this.insp = h('aside', { class: 'inspector' });
     this.transport = h('div', { class: 'transport' });
     this.tlEl = h('div', { class: 'timeline' });
-    root.append(h('div', { class: 'review' },
+    root.append(this.rootEl = h('div', { class: 'review' },
       this.side,
       h('div', { class: 'rv-main' },
         h('div', { class: 'stage' }, this.gridEl, this.insp),
@@ -1129,9 +1131,25 @@ const ReviewScreen = {
     this.stop();
     this.saveTakes(true);
     this.flushOffsets(true);
-    Object.assign(RV, { t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [], takesDirty: false, opts: null });
+    this.saveOpts(true);
+    clearTimeout(this.deferTimer);
+    Object.assign(RV, {
+      t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [],
+      takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined,
+    });
+  },
+  /** True while the user is mid-gesture or typing — a re-render would lose it. */
+  busy() {
+    if (this.timeline && this.timeline.drag) return true;
+    const a = document.activeElement;
+    return !!(a && this.rootEl && this.rootEl.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'));
   },
   update() {
+    clearTimeout(this.deferTimer);
+    if (this.busy()) {
+      this.deferTimer = setTimeout(() => { if (mounted === this) this.update(); }, 400);
+      return;
+    }
     this.adopt(false);
     this.renderAll();
   },
@@ -1147,6 +1165,9 @@ const ReviewScreen = {
       RV.takes = clone(S.data.takes || []);
       RV.committed = clone(RV.takes);
     }
+    // a sync shifts takes on the server; undo entries from before it are in the old frame
+    if (RV.syncedAt !== undefined && RV.syncedAt !== S.data.state.synced_at) RV.undo = [];
+    RV.syncedAt = S.data.state.synced_at;
     for (const [fid, off] of RV.pendingOffsets) {
       const f = fileById(fid);
       if (f) { f.offset = off; f.sync = { ...(f.sync || {}), method: 'manual' }; }
@@ -1451,12 +1472,19 @@ const ReviewScreen = {
       return;
     }
     RV.takesSaving = true;
+    const name = S.name;
     try {
       const d = await api('PUT', sUrl('/takes'), JSON.parse(body));
-      S.data.takes = d.takes;
-      S.data.state = d.state;
+      if (S.name === name && S.data) {
+        S.data.takes = d.takes;
+        S.data.state = d.state;
+      }
     } catch (e) {
-      RV.takesDirty = true;
+      if (S.name === name) {
+        RV.takesDirty = true;
+        clearTimeout(this.takesTimer);
+        this.takesTimer = setTimeout(() => this.saveTakes(), 3000); // retry
+      }
       toast(`Couldn't save takes: ${e.message}`, 'error');
     } finally {
       RV.takesSaving = false;
@@ -1525,9 +1553,18 @@ const ReviewScreen = {
   },
   async resync(f, refId) {
     if (!refId) return;
+    const name = S.name;
     try {
       await this.flushOffsets();
-      const r = await POST(sUrl(`/files/${f.id}/resync`), { ref_fid: refId });
+      let job = await POST(sUrl(`/files/${f.id}/resync`), { ref_fid: refId });
+      pollSoon();
+      while (job.status === 'queued' || job.status === 'running') {
+        await new Promise((r) => setTimeout(r, 300));
+        job = await GET(`/api/jobs/${job.id}`);
+      }
+      if (S.name !== name) return;
+      if (job.status !== 'done') { toast(`Re-sync failed: ${job.error || job.status}`, 'error'); return; }
+      const r = job.result;
       toast(`${basename(f.rel)} → ${fmtOffset(r.offset)} (score ${r.score.toFixed(3)}, ratio ${r.ratio.toFixed(2)})${r.accepted ? '' : ' — weak match, check it'}`, r.accepted ? 'ok' : '');
       await refreshSession();
     } catch (e) { toast(e.message, 'error'); }
@@ -1685,9 +1722,10 @@ const ReviewScreen = {
       fetch(sUrl('/export_options'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
       return;
     }
+    const name = S.name;
     try {
       const d = await api('PUT', sUrl('/export_options'), JSON.parse(body));
-      S.data.export_options = d.export_options;
+      if (S.name === name && S.data) S.data.export_options = d.export_options;
     } catch (e) { toast(e.message, 'error'); }
   },
   async exportNow() {
