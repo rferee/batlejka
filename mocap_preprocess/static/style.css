@@ -241,6 +241,7 @@ input[type=number].input { -moz-appearance: textfield; }
 .fpsbanner { display: flex; align-items: flex-start; gap: 16px; padding: 16px 20px; background: var(--rf-bg-light); border: 1px solid var(--hairline); }
 .fpsbanner img { width: 28px; height: 28px; flex-shrink: 0; }
 .fpsbanner .fa-circle-xmark { font-size: 26px; color: var(--dragonblood-red); }
+.fpsbanner .fa-folder-open { font-size: 24px; }
 .fpsbanner .lines { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
 .fpsbanner .headline { font-size: 14px; font-weight: 700; }
 .fpsbanner .headline span { font-weight: 300; color: var(--fg-2); }

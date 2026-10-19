@@ -327,6 +327,12 @@ function parseHash() {
   const m = /^#\/([^/]+)(?:\/([a-z]+))?/.exec(location.hash || '');
   return m ? { name: decodeURIComponent(m[1]), step: m[2] || null } : null;
 }
+window.addEventListener('hashchange', async () => {
+  const want = parseHash();
+  if (!want) return;
+  if (want.name !== S.name && S.sessions.some((s) => s.name === want.name)) await openSession(want.name);
+  if (want.step && want.step !== S.step && STEPS.some((s) => s.id === want.step)) go(want.step);
+});
 
 export function render() {
   renderSteps();
@@ -582,7 +588,7 @@ const ProcessScreen = {
       h('label', { class: 'field' }, 'Scrub proxy size',
         h('select', { class: 'input', onchange: (e) => putSettings({ proxy_long_side: Number(e.target.value) }) },
           PROXY_SIZES.map((r) => h('option', { value: r, selected: r === st.proxy_long_side }, `${r} px long side`))),
-        h('span', { class: 'note' }, 'low-res H.264, 15-frame GOP — only used for the preview')),
+        h('span', { class: 'note' }, 'low-res H.264, 15-frame GOP — preview only; a new size rebuilds proxies on the next Process')),
       h('div', { class: 'toggle', onclick: () => putSettings({ hwaccel: !st.hwaccel }) },
         h('span', { class: `check ${st.hwaccel ? 'on' : ''}` }, icon('check')),
         'GPU decode (-hwaccel cuda) for proxies and export'),
@@ -625,7 +631,7 @@ const ProcessScreen = {
     const R = this.right;
     R.innerHTML = '';
     const fc = S.data.fps_check;
-    const signs = { ok: h('img', { src: '/static/assets/success-sign-green.svg', alt: '' }), warn: h('img', { src: '/static/assets/warning-sign-orange.svg', alt: '' }), error: icon('circle-xmark') };
+    const signs = { ok: h('img', { src: '/static/assets/success-sign-green.svg', alt: '' }), warn: h('img', { src: '/static/assets/warning-sign-orange.svg', alt: '' }), error: icon('circle-xmark'), empty: icon('folder-open', 'muted') };
     const cams = S.data.cameras.length;
     R.append(h('div', { class: 'fpsbanner' },
       activeJob('scan') ? icon('spinner', 'fa-spin muted') : signs[fc.level],

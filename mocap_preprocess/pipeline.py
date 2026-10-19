@@ -215,6 +215,8 @@ def fps_check(data: dict) -> dict:
         level = "error"
     elif items:
         level = "warn"
+    if not vids and level == "ok":
+        level = "empty"
     if not vids:
         summary = "no video files yet"
     elif level == "ok":
