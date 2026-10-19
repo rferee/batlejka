@@ -1,4 +1,5 @@
 // mocap-preprocess UI. Plain ES modules, no build step.
+import { applyFit } from './grid.js';
 
 // ------------------------------------------------------------------ helpers
 export function h(tag, props = null, ...kids) {
@@ -674,6 +675,239 @@ const ProcessScreen = {
 screens.process = ProcessScreen;
 
 export const fileById = (id) => (S.data?.files || []).find((f) => f.id === id);
+
+// ------------------------------------------------------------------ Cameras screen
+const PHONE_MAKE = /apple|google|samsung|xiaomi|oneplus|huawei|motorola|oppo|vivo|iphone|ipad|pixel|android/i;
+
+function nextFree(prefix, used) {
+  let k = 1;
+  while (used.has(`${prefix}${k}`)) k += 1;
+  return `${prefix}${k}`;
+}
+
+const CamerasScreen = {
+  cams: [],
+  assign: {},
+  dirty: false,
+  saving: false,
+  fits: [],
+  mount(root) {
+    this.root = h('main', { class: 'page' });
+    root.append(this.root);
+    this.ro = new ResizeObserver(() => this.refit());
+    this.load();
+    this.render();
+  },
+  unmount() {
+    this.flush();
+    this.ro.disconnect();
+  },
+  sessionChanged() {
+    this.flush();
+    this.cams = [];
+    this.assign = {};
+  },
+  load() {
+    this.cams = structuredClone(S.data?.cameras || []);
+    this.assign = {};
+  },
+  update() {
+    if (!this.dirty && !this.saving) this.load();
+    const a = document.activeElement;
+    if (a && this.root.contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
+    this.render();
+  },
+  onJobs() {
+    const b = this.root.querySelector('[data-regroup]');
+    if (b) b.disabled = !!activeJob('regroup');
+  },
+  camOf(f) { return this.assign[f.id] ?? f.camera; },
+  filesOf(cid) {
+    return videoFiles().filter((f) => this.camOf(f) === cid)
+      .sort((a, b) => (a.offset ?? 1e12) - (b.offset ?? 1e12) || a.rel.localeCompare(b.rel));
+  },
+  schedule() {
+    this.dirty = true;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.save(), 500);
+  },
+  async save() {
+    clearTimeout(this.timer);
+    if (!this.dirty || !S.name) return;
+    const body = { cameras: this.cams, assignments: this.assign };
+    this.dirty = false;
+    this.saving = true;
+    try {
+      const d = await PUT(sUrl('/cameras'), body);
+      this.saving = false;
+      if (!this.dirty) {
+        S.data = d;
+        render();
+      }
+    } catch (e) {
+      this.saving = false;
+      toast(e.message, 'error');
+    }
+  },
+  flush() {
+    // keepalive lets the request finish even while the page unloads
+    if (!this.dirty || !S.name) return;
+    clearTimeout(this.timer);
+    this.dirty = false;
+    fetch(sUrl('/cameras'), {
+      method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cameras: this.cams, assignments: this.assign }),
+    }).catch(() => {});
+  },
+  async regroup() {
+    const ok = await confirmModal({
+      title: 'Re-run auto grouping?',
+      body: 'This replaces the current camera assignments, names and rotations with a fresh automatic grouping.',
+      ok: 'Re-run grouping',
+    });
+    if (!ok) return;
+    clearTimeout(this.timer);
+    this.dirty = false;
+    await startJob('/regroup');
+  },
+  move(f, cid) {
+    if (cid === '__new') {
+      const cam = {
+        id: nextFree('c', new Set(this.cams.map((c) => c.id))),
+        name: nextFree('cam', new Set(this.cams.map((c) => c.name))),
+        rotation: 0, include: true, grouped_by: 'manual',
+      };
+      this.cams.push(cam);
+      cid = cam.id;
+    }
+    this.assign[f.id] = cid;
+    this.cams = this.cams.filter((c) => this.filesOf(c.id).length > 0);
+    this.schedule();
+    this.render();
+  },
+  refit() {
+    for (const [img, box, dw, dh, getRot] of this.fits) {
+      if (img.isConnected) applyFit(img, box, dw, dh, getRot());
+    }
+  },
+  render() {
+    const r = this.root;
+    r.innerHTML = '';
+    this.fits = [];
+    this.ro.disconnect();
+    if (!S.data) return;
+    const vids = videoFiles();
+    const n = this.cams.length;
+    r.append(h('div', { class: 'head-row' },
+      h('div', { class: 'page-head' },
+        h('h1', null, 'Cameras'),
+        h('p', null, `${n} camera${n === 1 ? '' : 's'}, ${vids.length} files, sorted. Fix orientation against the sample frame `
+          + '(person should be standing, not napping) and name them. Rotation is only applied when exporting.')),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn big', 'data-regroup': '1', disabled: !!activeJob('regroup'), onclick: () => this.regroup() },
+          icon('wand-magic-sparkles'), 'Re-run auto grouping'),
+        h('button', { class: 'btn primary big', onclick: () => { this.save(); go('sync'); } }, icon('wave-square'), 'Sync cameras'))));
+    const grid = h('div', { class: 'camgrid' });
+    const names = {};
+    for (const c of this.cams) names[c.name] = (names[c.name] || 0) + 1;
+    for (const c of this.cams) grid.append(this.card(c, names[c.name] > 1));
+    const orphans = vids.filter((f) => !this.cams.some((c) => c.id === this.camOf(f)));
+    if (orphans.length) grid.append(this.orphanCard(orphans));
+    r.append(grid);
+    requestAnimationFrame(() => this.refit());
+  },
+  moveSelect(f) {
+    const cur = this.camOf(f);
+    return h('select', { title: 'Move to camera', onchange: (e) => this.move(f, e.target.value) },
+      this.cams.map((c) => h('option', { value: c.id, selected: c.id === cur }, c.name)),
+      cur && this.cams.some((c) => c.id === cur) ? null : h('option', { value: '', selected: true }, '—'),
+      h('option', { value: '__new' }, '+ new camera'));
+  },
+  fileRow(f, getRot) {
+    const mini = h('div', { class: 'mini', style: { position: 'relative' } });
+    if (f.assets.thumb) {
+      const v = f.probe.video;
+      const img = h('img', { src: mediaUrl('thumb', f, 'jpg'), alt: '', style: { position: 'absolute', maxWidth: 'none', maxHeight: 'none' } });
+      mini.append(img);
+      this.fits.push([img, mini, v.display_width, v.display_height, getRot]);
+    }
+    return h('div', { class: 'camfile' }, mini,
+      h('div', { class: 'meta' },
+        h('span', { class: 'ellipsis', title: f.rel, style: { color: 'var(--fg-1)' } }, f.rel),
+        h('span', { class: 'dim' }, `${fmtDur(f.probe.duration)} · at ${f.offset != null ? fmtClock(f.offset) : "—"}`)),
+      this.moveSelect(f));
+  },
+  card(c, dupName) {
+    const files = this.filesOf(c.id);
+    const first = files[0];
+    const v = first?.probe.video;
+    const p = first?.probe || {};
+    const dw = v?.display_width || 16;
+    const dh = v?.display_height || 9;
+    const rotChip = h('span', { class: 'chip tr' }, `${c.rotation}°`);
+    const box = h('div', { class: 'campreview' });
+    let img = null;
+    if (first && first.assets.thumb) {
+      img = h('img', { src: mediaUrl('thumb', first, 'jpg'), alt: '' });
+      box.append(img);
+      this.fits.push([img, box, dw, dh, () => c.rotation]);
+      this.ro.observe(box);
+    } else {
+      box.append(h('span', { class: 'chip bl' }, 'no preview frame'));
+    }
+    if (first) box.append(h('span', { class: 'chip tl' }, `sample · ${basename(first.rel)} @ ${fmtClock(0.3 * (p.duration || 0))}`));
+    box.append(rotChip);
+    if (v && v.rotation_meta) box.append(h('span', { class: 'chip bl' }, `metadata ${v.rotation_meta}° applied`));
+
+    const angles = [0, 90, 180, 270];
+    const angleBtns = angles.map((a) => h('button', { class: a === c.rotation ? 'on' : '', onclick: () => setRot(a) }, `${a}°`));
+    const setRot = (deg) => {
+      c.rotation = ((deg % 360) + 360) % 360;
+      this.refit(); // CSS transform only — nothing is re-encoded (R1)
+      rotChip.textContent = `${c.rotation}°`;
+      angleBtns.forEach((b, i) => b.classList.toggle('on', angles[i] === c.rotation));
+      this.schedule();
+    };
+    const make = [p.make, p.model].filter(Boolean).join(' ') || 'unknown device';
+    let rotNote;
+    let rotColor = '';
+    if (v && v.rotation_meta) rotNote = `prefilled from metadata: rotate=${v.rotation_meta} (already applied)`;
+    else if (c.rotation) rotNote = `rotated ${c.rotation}° by you`;
+    else if (PHONE_MAKE.test(make)) { rotNote = 'no rotation tag — check this one'; rotColor = 'warn'; }
+    else rotNote = 'no rotation metadata';
+    const grouped = c.grouped_by === 'subfolder' ? 'subfolder' : c.grouped_by === 'manual' ? 'you' : 'metadata + background';
+
+    return h('div', { class: `camcard ${c.include ? '' : 'excluded'}` },
+      box,
+      h('div', { class: 'rotbar' },
+        h('button', { title: 'Rotate 90° counter-clockwise', onclick: () => setRot(c.rotation - 90) }, icon('rotate-left')),
+        angleBtns,
+        h('button', { title: 'Rotate 90° clockwise', onclick: () => setRot(c.rotation + 90) }, icon('rotate-right'))),
+      h('div', { class: 'cambody' },
+        h('input', {
+          class: `input camname ${dupName ? 'invalid' : ''}`, value: c.name, spellcheck: 'false',
+          oninput: (e) => { c.name = e.target.value; this.schedule(); },
+          onblur: () => this.render(),
+        }),
+        dupName ? h('span', { class: 'note warn' }, 'name used twice — export file names would collide') : null,
+        h('div', { class: 'caminfo' },
+          h('span', null, `${make} · ${dw}×${dh} · ${v ? fpsLabel(v.nominal_fps) : '?'} fps`),
+          h('span', { class: c.grouped_by === 'subfolder' || c.grouped_by === 'manual' ? '' : 'info' }, `grouped by ${grouped}`),
+          h('span', { class: rotColor }, rotNote)),
+        h('div', { class: 'toggle', onclick: () => { c.include = !c.include; this.schedule(); this.render(); } },
+          h('span', { class: `check ${c.include ? 'on' : ''}` }, icon('check')), 'include in export'),
+        h('div', { class: 'camfiles' }, files.map((f) => this.fileRow(f, () => c.rotation)))));
+  },
+  orphanCard(files) {
+    return h('div', { class: 'camcard' },
+      h('div', { class: 'cambody' },
+        h('b', null, 'Unassigned'),
+        h('span', { class: 'note' }, 'pick a camera for these files'),
+        h('div', { class: 'camfiles' }, files.map((f) => this.fileRow(f, () => 0)))));
+  },
+};
+screens.cameras = CamerasScreen;
+window.addEventListener('beforeunload', () => CamerasScreen.flush());
 
 // ------------------------------------------------------------------ placeholder screens (filled in later milestones)
 for (const id of ['cameras', 'sync', 'review']) {

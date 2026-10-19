@@ -284,11 +284,11 @@ table.ftable tr:hover td { background: rgba(255,255,255,0.02); }
 .camname { padding: 8px 10px; font-size: 15px; font-weight: 700; }
 .caminfo { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--fg-2); }
 .camfiles { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--hairline); padding-top: 10px; }
-.camfile { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 11px; color: var(--fg-2); }
+.camfile { display: grid; grid-template-columns: 40px minmax(0, 1fr) 92px; gap: 8px; align-items: center; font-size: 11px; color: var(--fg-2); }
 .camfile .mini { width: 40px; height: 30px; background: var(--rf-bg-light); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .camfile .mini img { max-width: 100%; max-height: 100%; }
 .camfile .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.camfile select { font-size: 11px; padding: 3px 4px; background: var(--rf-bg-light); border: 1px solid var(--hairline); color: var(--fg-2); max-width: 110px; }
+.camfile select { font-size: 11px; padding: 3px 4px; background: var(--rf-bg-light); border: 1px solid var(--hairline); color: var(--fg-2); width: 100%; }
 
 /* ---------------------------------------------------------------- sync */
 .sync-split { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 32px; align-items: start; }

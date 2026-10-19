@@ -3,19 +3,21 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
 from . import ffmpeg_tools as ff
-from . import pipeline
+from . import grouping, pipeline
 from .jobs import JobConflict, JobManager
-from .session_store import InvalidName, SessionNotFound, SessionStore, validate_session_name
+from .session_store import (InvalidName, SessionNotFound, SessionStore, validate_fid,
+                            validate_session_name)
 
 app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
 store = SessionStore()
@@ -122,35 +124,116 @@ def scan_session(s: str):
 SAMPLE_RATES = (4000, 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
 
 
+def _apply_settings(data: dict, payload: dict) -> None:
+    st = data["settings"]
+    if "target_fps" in payload:
+        fps = ff.parse_fraction(str(payload["target_fps"]).strip())
+        if fps is None:
+            raise HTTPException(400, f"invalid fps: {payload['target_fps']}")
+        fps_s = ff.frac_str(fps)
+        if fps_s != st["target_fps"]:
+            st["target_fps_user_set"] = True
+        st["target_fps"] = fps_s
+    if "target_fps_user_set" in payload:
+        st["target_fps_user_set"] = bool(payload["target_fps_user_set"])
+        if not st["target_fps_user_set"]:
+            pipeline.prefill_target_fps(data)
+    if "sync_sample_rate" in payload:
+        sr = int(payload["sync_sample_rate"])
+        if sr not in SAMPLE_RATES:
+            raise HTTPException(400, f"unsupported sample rate: {sr}")
+        st["sync_sample_rate"] = sr
+    if "proxy_long_side" in payload:
+        st["proxy_long_side"] = max(160, min(1920, int(payload["proxy_long_side"])))
+    if "hwaccel" in payload:
+        st["hwaccel"] = bool(payload["hwaccel"])
+    for key, lo, hi in (("sync_min_score", 0.0, 1.0), ("sync_min_ratio", 1.0, 100.0)):
+        if key in payload:
+            st[key] = max(lo, min(hi, float(payload[key])))
+
+
 @app.put("/api/sessions/{s}/settings")
 def put_settings(s: str, payload: dict = Body(...)):
     name = _session(s)
     with store.edit(name) as data:
-        st = data["settings"]
-        if "target_fps" in payload:
-            fps = str(payload["target_fps"]).strip()
-            if ff.parse_fraction(fps) is None:
-                raise HTTPException(400, f"invalid fps: {fps}")
-            fps = ff.frac_str(ff.parse_fraction(fps))
-            if fps != st["target_fps"]:
-                st["target_fps_user_set"] = True
-            st["target_fps"] = fps
-        if "target_fps_user_set" in payload:
-            st["target_fps_user_set"] = bool(payload["target_fps_user_set"])
-            if not st["target_fps_user_set"]:
-                pipeline.prefill_target_fps(data)
-        if "sync_sample_rate" in payload:
-            sr = int(payload["sync_sample_rate"])
-            if sr not in SAMPLE_RATES:
-                raise HTTPException(400, f"unsupported sample rate: {sr}")
-            st["sync_sample_rate"] = sr
-        if "proxy_long_side" in payload:
-            st["proxy_long_side"] = max(160, min(1920, int(payload["proxy_long_side"])))
-        if "hwaccel" in payload:
-            st["hwaccel"] = bool(payload["hwaccel"])
-        for key, lo, hi in (("sync_min_score", 0.0, 1.0), ("sync_min_ratio", 1.0, 100.0)):
-            if key in payload:
-                st[key] = max(lo, min(hi, float(payload[key])))
+        _apply_settings(data, payload)
+    return session_view(name)
+
+
+def _start_proxies(name: str):
+    try:
+        return jobs.start("proxies", name, lambda j: pipeline.run_proxies(store, name, j), label="Build proxies")
+    except JobConflict:
+        return None
+
+
+@app.post("/api/sessions/{s}/process")
+def process_session(s: str, payload: dict = Body(default={})):
+    name = _session(s)
+    _require_tools()
+    if (payload or {}).get("settings"):
+        with store.edit(name) as data:
+            _apply_settings(data, payload["settings"])
+    job = jobs.start("process", name, lambda j: pipeline.process(store, name, j, lambda: _start_proxies(name)),
+                     label="Process source files")
+    return _job_response(job)
+
+
+@app.post("/api/sessions/{s}/proxies")
+def build_proxies(s: str):
+    name = _session(s)
+    _require_tools()
+    job = _start_proxies(name) or next(iter(jobs.active(name, "proxies")), None)
+    return _job_response(job)
+
+
+@app.post("/api/sessions/{s}/regroup")
+def regroup(s: str):
+    name = _session(s)
+
+    def run(job):
+        paths = store.paths(name)
+        with store.edit(name) as data:
+            grouping.regroup(data, pipeline.video_files(data), pipeline.load_feature_fn(paths))
+            n = len(data["cameras"])
+        job.log(f"grouped into {n} camera(s)")
+        return {"cameras": n}
+
+    return _job_response(jobs.start("regroup", name, run, label="Re-run grouping"))
+
+
+_CAM_ID = re.compile(r"^c\d{1,4}$")
+
+
+@app.put("/api/sessions/{s}/cameras")
+def put_cameras(s: str, payload: dict = Body(...)):
+    name = _session(s)
+    cams_in = payload.get("cameras")
+    assignments = payload.get("assignments") or {}
+    if not isinstance(cams_in, list) or not isinstance(assignments, dict):
+        raise HTTPException(400, "expected {cameras: [...], assignments: {file_id: camera_id}}")
+    with store.edit(name) as data:
+        old = {c["id"]: c for c in data["cameras"]}
+        cams, ids = [], set()
+        for c in cams_in:
+            cid = str(c.get("id", ""))
+            if not _CAM_ID.match(cid) or cid in ids:
+                raise HTTPException(400, f"bad camera id: {cid!r}")
+            rot = int(c.get("rotation", 0))
+            if rot not in (0, 90, 180, 270):
+                raise HTTPException(400, f"rotation must be 0/90/180/270, got {rot}")
+            ids.add(cid)
+            cams.append({"id": cid, "name": str(c.get("name") or "").strip()[:60] or cid, "rotation": rot,
+                         "include": bool(c.get("include", True)),
+                         "grouped_by": (old.get(cid) or {}).get("grouped_by", "manual")})
+        files = {f["id"]: f for f in data["files"]}
+        for fid, cid in assignments.items():
+            validate_fid(fid)
+            if fid not in files or cid not in ids:
+                raise HTTPException(400, f"bad assignment {fid} -> {cid}")
+            files[fid]["camera"] = cid
+        used = {f.get("camera") for f in data["files"]}
+        data["cameras"] = [c for c in cams if c["id"] in used]
     return session_view(name)
 
 
@@ -195,6 +278,75 @@ def cancel_job(job_id: str):
     if job is None:
         raise HTTPException(404, "job not found")
     return job.info()
+
+
+# ---------------------------------------------------------------------------
+# media (Range support is required for <video> seeking in Chrome)
+
+def _file_response_handles_range() -> bool:
+    try:
+        src = inspect.getsource(FileResponse).lower()
+    except (OSError, TypeError):
+        return False
+    return "content-range" in src and "206" in src
+
+
+FILE_RESPONSE_RANGE = _file_response_handles_range()
+_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _range_response(path: Path, media_type: str, request: Request) -> Response:
+    """Starlette's FileResponse handles Range itself in recent versions; this
+    is the fallback for older installs."""
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+    rng = request.headers.get("range")
+    if FILE_RESPONSE_RANGE or not rng:
+        return FileResponse(path, media_type=media_type, headers=headers)
+    size = path.stat().st_size
+    m = _RANGE.match(rng.strip())
+    if not m or (m.group(1) == "" and m.group(2) == ""):
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    if m.group(1) == "":
+        start, end = max(0, size - int(m.group(2))), size - 1
+    else:
+        start = int(m.group(1))
+        end = min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+    if start >= size or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+
+    def body():
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = fh.read(min(1 << 16, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers.update({"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(end - start + 1)})
+    return StreamingResponse(body(), status_code=206, media_type=media_type, headers=headers)
+
+
+_MEDIA = {"thumb": ("jpg", "image/jpeg"), "proxy": ("mp4", "video/mp4"), "wave": ("json", "application/json")}
+
+
+@app.get("/media/{s}/{kind}/{filename}")
+def media(s: str, kind: str, filename: str, request: Request):
+    name = _session(s)
+    if kind not in _MEDIA:
+        raise HTTPException(404, "unknown media kind")
+    ext, mime = _MEDIA[kind]
+    stem, dot, got_ext = filename.rpartition(".")
+    if not dot or got_ext != ext:
+        raise HTTPException(404, "not found")
+    fid = validate_fid(stem)
+    paths = store.paths(name)
+    path = {"thumb": paths.thumb, "proxy": paths.proxy, "wave": paths.wave_json}[kind](fid)
+    if not path.exists():
+        raise HTTPException(404, "not built yet")
+    return _range_response(path, mime, request)
 
 
 # ---------------------------------------------------------------------------

@@ -2,14 +2,19 @@
 the fps check, process (§6.2) and proxies (§6.4)."""
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
 from pathlib import Path
 
+import numpy as np
+from scipy import ndimage
+
 from . import config
 from . import ffmpeg_tools as ff
+from . import grouping, syncing
 from .jobs import Job
 from .session_store import SessionStore, file_id, now
 
@@ -218,6 +223,207 @@ def fps_check(data: dict) -> dict:
         summary = f"{n_ok} ok · {len(vids) - n_ok} off-target"
     return {"level": level, "summary": summary, "target": target, "target_label": ff.fps_label(target),
             "n_ok": n_ok, "n_video": len(vids), "items": items}
+
+
+# ---------------------------------------------------------------------------
+# process
+
+FEATURE_HIGHPASS_SIGMA = 3.0
+
+def _save_npy(path: Path, arr: np.ndarray) -> None:
+    tmp = path.with_name(path.stem + ".tmp.npy")
+    with open(tmp, "wb") as fh:
+        np.save(fh, arr)
+    ff.replace_with_retry(tmp, path)
+
+
+def write_waveform(samples: np.ndarray, sr: int, a0: float, path: Path) -> None:
+    """Peak |amplitude| per 20 ms bin, normalized to 0–255."""
+    b = max(1, int(round(sr * config.WAVE_BIN_SECONDS)))
+    n = len(samples) // b
+    if n:
+        peaks = np.abs(samples[: n * b].reshape(n, b)).max(axis=1)
+    else:
+        peaks = np.zeros(0, dtype=np.float32)
+    top = float(peaks.max()) if len(peaks) else 0.0
+    q = np.round(peaks / top * 255).astype(np.uint8) if top > 0 else np.zeros(len(peaks), np.uint8)
+    payload = {"bin": b / sr, "start": a0, "duration": len(samples) / sr, "peaks": q.tolist()}
+    tmp = path.with_name(path.stem + ".tmp.json")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, separators=(",", ":"))
+    ff.replace_with_retry(tmp, path)
+
+
+def process_file(paths, f: dict, sr: int, job: Job | None) -> dict:
+    fid = f["id"]
+    src = paths.source_file(f["rel"])
+    probe = f["probe"]
+    dur = float(probe.get("duration") or 0)
+    assets = {}
+
+    thumb = paths.thumb(fid)
+    if not thumb.exists():
+        ff.grab_jpeg(src, 0.3 * dur, thumb)
+    assets["thumb"] = thumb.exists()
+    if job:
+        job.check_cancel()
+
+    feat = paths.feature(fid)
+    if not feat.exists():
+        frames = [ff.grab_gray(src, p * dur) for p in (0.1, 0.3, 0.5, 0.7, 0.9)]
+        frames = [x for x in frames if x is not None]
+        if frames:
+            # per-pixel median = static background (the moving person drops out);
+            # a mild high-pass removes the bright-ceiling/dark-floor layout that
+            # every view of the same room shares, leaving furniture and edges
+            med = np.median(np.stack(frames), axis=0)
+            hp = med - ndimage.gaussian_filter(med, FEATURE_HIGHPASS_SIGMA, mode="nearest")
+            z = (hp - hp.mean()) / (hp.std() + 1e-6)
+            _save_npy(feat, z.astype(np.float32))
+    assets["features"] = feat.exists()
+    if job:
+        job.check_cancel()
+
+    if probe.get("audio"):
+        a = paths.audio_npy(fid, sr)
+        samples = None
+        if not a.exists():
+            samples = ff.extract_audio(src, sr)
+            _save_npy(a, samples)
+        assets["audio"] = True
+        wave = paths.wave_json(fid)
+        if not wave.exists():
+            if samples is None:
+                samples = np.load(a)
+            a0 = float((probe["audio"] or {}).get("start") or 0) - float(probe.get("format_start") or 0)
+            write_waveform(samples, sr, a0, wave)
+        assets["wave"] = True
+    else:
+        assets["audio"] = assets["wave"] = False
+    return assets
+
+
+def load_feature_fn(paths):
+    def load(f: dict):
+        p = paths.feature(f["id"])
+        try:
+            return np.load(p) if p.exists() else None
+        except (OSError, ValueError):
+            return None
+    return load
+
+
+def process(store: SessionStore, name: str, job: Job, start_proxies=None) -> dict:
+    paths = store.paths(name).ensure()
+    data = store.load(name)
+    sr = int(data["settings"]["sync_sample_rate"])
+    files = video_files(data)
+    if not files:
+        raise RuntimeError("no video files to process — drop footage into source/ and re-scan")
+    job.log(f"processing {len(files)} files with {config.PROCESS_WORKERS} workers")
+    results: dict[str, dict] = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=config.PROCESS_WORKERS) as ex:
+        futs = {ex.submit(process_file, paths, f, sr, job): f for f in files}
+        try:
+            for fut in as_completed(futs):
+                f = futs[fut]
+                try:
+                    results[f["id"]] = fut.result()
+                except ff.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    job.log(f"{f['rel']}: {e}", "error")
+                done += 1
+                job.set_progress(0.9 * done / len(files), f"{done}/{len(files)} files")
+        except ff.Cancelled:
+            for fu in futs:
+                fu.cancel()
+            raise
+    job.check_cancel()
+
+    with store.edit(name) as data:
+        for f in data["files"]:
+            if f["id"] in results:
+                f["assets"].update(results[f["id"]])
+        vids = video_files(data)
+        load = load_feature_fn(paths)
+        cam_ids = {c["id"] for c in data["cameras"]}
+        if any(f.get("camera") in cam_ids for f in vids):
+            new = grouping.assign_new(data, vids, load)
+            if new:
+                job.log(f"assigned {len(new)} new file(s) to cameras")
+        else:
+            grouping.regroup(data, vids, load)
+            job.log(f"grouped into {len(data['cameras'])} camera(s): "
+                    + ", ".join(f"{c['name']} ({sum(1 for f in vids if f['camera'] == c['id'])})" for c in data["cameras"]))
+        syncing.place_provisional(data)
+        data["state"]["processed_at"] = now()
+    job.set_progress(1.0, "done")
+    if start_proxies:
+        start_proxies()
+    return {"files": len(files)}
+
+
+# ---------------------------------------------------------------------------
+# proxies
+
+def proxy_ok(paths, f: dict, long_side: int) -> bool:
+    return (f["assets"].get("proxy") and f["assets"].get("proxy_size") == long_side
+            and paths.proxy(f["id"]).exists())
+
+
+def run_proxies(store: SessionStore, name: str, job: Job) -> dict:
+    """Build scrub proxies, shortest files first (so takes are usable early),
+    re-reading the session after each file so new files get picked up."""
+    paths = store.paths(name).ensure()
+    built, failed = 0, set()
+    while True:
+        job.check_cancel()
+        data = store.load(name)
+        st = data["settings"]
+        L = int(st["proxy_long_side"])
+        pending = [f for f in video_files(data) if not proxy_ok(paths, f, L) and f["id"] not in failed]
+        if not pending:
+            break
+        f = min(pending, key=lambda x: float(x["probe"].get("duration") or 0))
+        total = built + len(failed) + len(pending)
+        dur = float(f["probe"].get("duration") or 0)
+        tmp, dst = paths.proxy_tmp(f["id"]), paths.proxy(f["id"])
+        src = paths.source_file(f["rel"])
+        base = built + len(failed)
+        label = f"{base + 1}/{total} {f['rel']}"
+        job.set_progress(base / total, label)
+
+        def prog(x, base=base, total=total, label=label):
+            job.set_progress((base + x) / total, label)
+
+        ok = False
+        for hw in ([True, False] if st.get("hwaccel") else [False]):
+            try:
+                rc, err = ff.run_progress(ff.proxy_args(src, tmp, L, hw), dur, prog, job.cancel_event)
+            except ff.Cancelled:
+                tmp.unlink(missing_ok=True)
+                raise
+            if rc == 0 and tmp.exists():
+                ok = True
+                break
+            job.log(f"{f['rel']}: proxy failed{' with -hwaccel cuda, retrying on CPU' if hw else ''}: {err[-300:]}",
+                    "warn" if hw else "error")
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            failed.add(f["id"])
+            continue
+        ff.replace_with_retry(tmp, dst)
+        with store.edit(name) as d:
+            for x in d["files"]:
+                if x["id"] == f["id"]:
+                    x["assets"]["proxy"] = True
+                    x["assets"]["proxy_size"] = L
+        built += 1
+        job.log(f"proxy ready: {f['rel']}")
+    job.set_progress(1.0, f"{built} built" + (f", {len(failed)} failed" if failed else ""))
+    return {"built": built, "failed": len(failed)}
 
 
 def standard_rates() -> list[dict]:
