@@ -41,8 +41,12 @@ reference for the main screen (see §7).
 6. Export selected takes: one folder per take, one `<camera>_synced.mp4` per camera,
    all with the same frame count and frame rate, correctly rotated.
 
+7. Calibrate the cameras and process takes with a pinned FreeMoCap (§12), headless,
+   in its own environment.
+
 **Non-goals**
-- No pose tracking, calibration, or FreeMoCap integration beyond the folder layout.
+- No pose tracking or calibration code of our own: FreeMoCap does both (§12). No editing
+  of FreeMoCap's results.
 - No accounts, no remote access (bind to `127.0.0.1`).
 - No editing of source files, ever. `source/` is read-only to this tool.
 
@@ -504,3 +508,93 @@ Commit messages: short imperative subject; push to `origin master` when mileston
   H.264 proxies.
 - Huge sources (4K, 10+ minutes) → proxies build in the background, longest last, and
   the UI stays usable throughout.
+
+## 12. FreeMoCap integration
+
+Replaces the old non-goal "no FreeMoCap integration beyond the folder layout". R1–R6 still
+apply (no `shell=True`, `CREATE_NO_WINDOW`, never block the UI, never touch `source/`).
+
+### 12.1 Pinned versions (don't upgrade without re-running the self-test)
+- FreeMoCap **v1.8.2**, git commit `a1cd374ac7c186d78d0552b8f69bf59be2f4bdcc` (not PyPI, which
+  stops at 1.0.28; not `main`, which is the v2 rewrite).
+- **Python 3.12** for the FreeMoCap env, installed by uv; never the system Python.
+- **opencv-contrib-python==4.8.1.78** and **no opencv-python**: a normal install also pulls
+  opencv-python 4.11, which shadows contrib and lacks `cv2.aruco.estimatePoseCharucoBoard`, so
+  calibration crashes right after board detection.
+- **uv==0.11.32** in the app's own `.venv` (requirements.txt).
+- MediaPipe tracking runs on CPU; no CUDA PyTorch. The GPU checks are for ffmpeg only.
+
+### 12.2 Environment (gitignored `.tools/`, per machine)
+```
+.tools/python/                     uv-managed Python (UV_PYTHON_INSTALL_DIR, set for every uv call)
+.tools/uv-cache/                   uv's cache (UV_CACHE_DIR): same drive as the venv, not C:
+.tools/gpu_probe.json              GPU decode / NVENC test results (keyed by ffmpeg path+version, driver)
+.tools/freemocap-v1.8.2/venv/      FreeMoCap env
+.tools/freemocap-v1.8.2/home/      FreeMoCap's home dir (--fmc-home), away from the user's GUI state
+.tools/freemocap-v1.8.2/logs/      raw output of every run
+.tools/freemocap-v1.8.2/selftest/  self-test data
+.tools/freemocap-v1.8.2/state.json installed_at, last check, last self-test
+```
+The lock `mocap_preprocess/fmc/requirements-freemocap.lock` is committed with its inputs
+(`in.txt`, `excludes.txt` = opencv-python, `overrides.txt` = opencv-contrib-python==4.8.1.78) and
+regenerated with
+`uv pip compile in.txt --python-version 3.12 --python-platform x86_64-pc-windows-msvc
+--excludes excludes.txt --overrides overrides.txt -o requirements-freemocap.lock`.
+
+Install job (kind `setup`, no session): preflight (git on PATH, ≥ 6 GB free) → `uv python
+install 3.12` → `uv venv --python 3.12` → `uv pip sync` of the lock → `fmc_headless.py check`
+must pass. Repair deletes the venv and redoes the last three steps; Remove deletes
+`.tools/freemocap-v1.8.2` after a confirm.
+
+### 12.3 Runner: `mocap_preprocess/fmc/fmc_headless.py`
+Runs inside the FreeMoCap venv (stdlib + FreeMoCap deps); the app never imports it. Invoked
+as `<venv>\Scripts\python.exe -I -u -X utf8 fmc_headless.py --fmc-home <home> <cmd> ...` with
+cwd `.tools/freemocap-v1.8.2`; output teed to `logs/<timestamp>_<cmd>.log`, ANSI stripped, cancel
+kills the process tree (tracking spawns workers).
+- `--fmc-home` sets HOME/USERPROFILE before freemocap is imported (1.8.2 puts freemocap_data/ under
+  `Path.home()` and creates its log file on import). Console logging is quieted to WARNING.
+- Output: `FMC_EVENT {json}` lines (take_start, take_done, take_failed, calibration_done, warn,
+  download, stage — stages from FreeMoCap's log messages: tracking_2d, triangulating, skeleton,
+  saving, blender), tqdm bars on stderr (`processing video: <cam>.mp4: NN%|…| n/total`, one per
+  camera), and `FMC_RESULT {json}` always last. Exit 0 = all ok.
+- `check`: versions; fails unless freemocap is v1.8.2 and `cv2.aruco.estimatePoseCharucoBoard` exists.
+- `calibrate <rec>`: `pin_camera_0_to_origin=True` always (1.8.2 raises UnboundLocalError when it and
+  `use_charuco_as_groundplane` are both False); the reprojection error is element [0] of
+  `CameraGroup.calibrate_videos`' return value; returns `<rec>/<stem>_camera_calibration.toml`.
+- `process <takes...> --toml T --processes N`: 1.8.2 pairs videos with calibration cameras by sorted
+  position only, so cameras are matched by name (video stem = TOML `name`): unknown camera or fewer
+  than 2 → the take fails; a subset → `<take>/<take>_camera_calibration.toml` with only those
+  cameras, renumbered in the take's order (+ `metadata.subset_of`); the full set → the TOML is copied
+  there unchanged. A take without `output_data/*_body_3d_xyz.npy` afterwards fails.
+- `selftest --workdir D`: FreeMoCap's 3-camera sample (7x5 board, 58 mm): calibrate one copy,
+  process another; passes when reprojection error < 2 px, NaN fraction < 0.2, median left upper arm
+  150–450 mm and left thigh 250–600 mm.
+
+### 12.4 Setup panel (Session screen)
+One row per requirement: ffmpeg/ffprobe, NVIDIA GPU (none = neutral), GPU decode and NVENC
+(actually encoded/decoded, results cached in `.tools/gpu_probe.json`), git, uv, FreeMoCap
+(not installed / installing / ready / broken + Install, Repair, Remove) and its self-test.
+`GET /api/setup[?refresh=1]`, `POST /api/setup/freemocap/{install|repair|remove|selftest}`.
+A failed GPU-decode or NVENC test disables those options (Process, Export); new sessions
+default to h264_nvenc when its test passed.
+
+### 12.5 Mocap step (step 7, after Export)
+- Enabled once a take is exported; without a ready FreeMoCap it links to the Setup panel.
+- Calibration: an exported take (default: the first whose name contains "calib"), board 7x5 / 5x3,
+  square size in mm (required — output units come from it), "board flat on the floor"
+  (→ ground plane). Shows the reprojection error (green < 1 px, amber < 2, red), cameras, date.
+- Takes: every other exported take with its cameras vs. the calibration (a subset is fine; a camera
+  the calibration doesn't know is an error), status (not processed / done / stale / failed), and
+  "Process selected" = one job, one subprocess. Leftover videos in `synchronized_videos/` that the
+  take's `take_info.json` doesn't list would be fed to FreeMoCap, so processing (and calibrating) is
+  blocked until they're deleted: 409 `{message, leftovers}`, then the UI offers to delete them and
+  resends with `delete_leftovers: true`.
+- After each take `output/<take>/mocap_info.json` records the FreeMoCap version, calibration (TOML,
+  error), cameras, subset, processes, time and the size+mtime of every video; a take is **stale**
+  when its videos changed (re-exported) or the calibration changed.
+- `session.json` gains
+  `"mocap": {"calibration": {...}, "options": {"processes", "blender", "blender_exe"}, "takes": {"<id>": {...}}}`.
+- FreeMoCap writes `output_data/`, `annotated_videos/`, `<take>_by_frame.csv/json`,
+  `<take>_by_trajectory.csv`, `<take>_frame_name_xyz.npy` into the take folder; re-export never
+  deletes them.
+

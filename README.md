@@ -10,7 +10,9 @@ clip** for the whole session, plus iPhones/iPads (Blackmagic Camera) that record
 placed on **one session timeline** (camera clocks from timestamps + audio, then
 audio within a small window); you mark the takes,
 and each take is exported as one video per camera, all with the **same frame
-count and frame rate**, correctly rotated.
+count and frame rate**, correctly rotated. Then it can calibrate the cameras and
+turn the takes into 3D skeletons with a pinned FreeMoCap 1.8.2 that it installs
+and runs headless in its own environment.
 
 `source/` is never modified.
 
@@ -20,6 +22,8 @@ count and frame rate**, correctly rotated.
 - `ffmpeg` and `ffprobe` on `PATH` — or point `MOCAP_FFMPEG` / `MOCAP_FFPROBE` at them
 - Optional: an NVIDIA GPU for `-hwaccel cuda` decoding and `h264_nvenc` encoding
 - A Chromium-based browser (Chrome/Edge) for the UI
+- For the Mocap step: `git` on `PATH` and ~6 GB free disk. FreeMoCap itself (with
+  its own Python 3.12) is installed from the Setup panel; nothing else to install.
 
 ## Running
 
@@ -49,18 +53,30 @@ sessions/<name>/
       take_info.json       #   take bounds, fps, per-camera source/offset/sync/rotation/padding
       synchronized_videos/
         <camera>_synced.mp4
+      mocap_info.json      #   after the Mocap step: FreeMoCap version, calibration, cameras, video snapshot
+      output_data/ ...     #   FreeMoCap's results (never deleted by a re-export)
   .preprocess/             # everything derived (safe to delete; it is rebuilt)
     session.json           #   all state: settings, files, cameras, offsets, takes
     thumbs/ features/ audio/ wave/ proxies/
+
+.tools/                    # per machine, gitignored: uv's Python 3.12, the FreeMoCap env,
+  freemocap-v1.8.2/        #   its home dir, logs of every run, self-test data, state.json
+  uv-cache/                #   uv's download cache (on the same drive, so installs hardlink)
+  gpu_probe.json           #   GPU decode / NVENC test results
 ```
 
 ## Workflow
 
-The header has six steps; a step unlocks once its prerequisites exist.
+The header has seven steps; a step unlocks once its prerequisites exist.
 The URL (`#/<session>/<step>`) can be bookmarked.
 
 1. **Session** — pick a folder in `sessions/` (or create one) and drop the
-   footage into its `source/`.
+   footage into its `source/`. The **Setup** card at the top checks ffmpeg,
+   the GPU (NVIDIA GPU, a real CUDA decode and NVENC encode test), git, uv and
+   FreeMoCap, and installs / repairs / removes FreeMoCap and runs its self-test.
+   It's folded to one "Setup OK" line once everything passes. A failed GPU test
+   disables that option in Process / Export; new sessions start on `h264_nvenc`
+   when its test passed.
 2. **Process** — the folder is scanned with `ffprobe` as soon as it opens. The
    target frame rate is prefilled with the most common rate (weighted by
    duration), and the fps check lists files at a different rate (with the
@@ -137,10 +153,28 @@ The URL (`#/<session>/<step>`) can be bookmarked.
    preview of the folder tree are on the right. **Export** writes one folder
    per take; every file is checked to have exactly `round(duration × fps)`
    frames.
+7. **Mocap** — FreeMoCap, headless (unlocks after an export).
+   - *Calibration*: pick the exported calibration take (the first one named
+     `calib…` is preselected), the ChArUco board (7x5 / 5x3), its **square size
+     in mm** (required: the output is in these units) and whether the board lay
+     flat on the floor (then the floor becomes the ground plane). The
+     reprojection error is shown green below 1 px, amber below 2 px, red above.
+   - *Takes*: every other exported take, with its cameras against the
+     calibration. A take may use a subset of the calibrated cameras (e.g. a phone
+     missed it): FreeMoCap 1.8.2 matches cameras by position only, so a
+     calibration with just those cameras, in the take's order, is written into
+     the take folder. A camera the calibration doesn't know is an error.
+     *Process selected* runs all ticked takes in one FreeMoCap process, with
+     per-take progress. Leftover videos from an earlier export that the take no
+     longer lists would be fed to FreeMoCap, so you're asked to delete them first
+     (for the calibration take too).
+   - A processed take turns **stale** when its videos are re-exported or the
+     calibration changes; process it again.
 
 ## Bringing exports into FreeMoCap
 
-Each `output/<take>/` folder is laid out like a FreeMoCap recording: a
+The Mocap step does this for you. To use your own FreeMoCap instead: each
+`output/<take>/` folder is laid out like a FreeMoCap recording, a
 `synchronized_videos/` folder whose videos all have identical frame counts.
 
 1. Copy the take folders (or just the ones you need) into your FreeMoCap
@@ -203,11 +237,29 @@ in `output/<take>/`.
   file (the break before it counted in frames) joined with `concat`; each file's
   audio is delayed to its exact offset, to the sample.
 
+## FreeMoCap environment
+
+- Pinned: FreeMoCap **v1.8.2** (git commit `a1cd374`, not PyPI and not `main`),
+  Python 3.12 from uv, `opencv-contrib-python==4.8.1.78` and **no**
+  `opencv-python` (4.11 shadows contrib and lacks
+  `cv2.aruco.estimatePoseCharucoBoard`, which crashes calibration). The lock is
+  `mocap_preprocess/fmc/requirements-freemocap.lock`, regenerated from `in.txt`,
+  `excludes.txt` and `overrides.txt` next to it (command in SPEC §12.2). Run the
+  self-test after any change.
+- `mocap_preprocess/fmc/fmc_headless.py` runs inside that env (`check`,
+  `calibrate`, `process`, `selftest`); the app reads its `FMC_EVENT` /
+  `FMC_RESULT` lines and tqdm bars. FreeMoCap's home is pointed at
+  `.tools/freemocap-v1.8.2/home`, so it never touches your FreeMoCap GUI's
+  `freemocap_data`. Every run's raw output is in `.tools/freemocap-v1.8.2/logs/`.
+- Tracking runs on the CPU (MediaPipe); *processes* sets how many cameras are
+  tracked at once (default: cameras, at most CPU cores − 1).
+
 ## Development
 
 ```
 pip install -r requirements-dev.txt
 python -m pytest
+python -m pytest -m fmc      # slow, opt-in: FreeMoCap self-test through the API (needs the env)
 ```
 
 The suite builds a synthetic session from the clips in
@@ -232,4 +284,7 @@ metadata; plus a run with every creation time removed).
 Code map: `server.py` (API, media with Range), `pipeline.py` (scan, fps check,
 process, proxies), `grouping.py`, `syncing.py`, `takes.py`, `exporter.py`,
 `ffmpeg_tools.py`, `session_store.py` (locked, atomic `session.json`), `jobs.py`
-(background jobs), `static/` (plain HTML/CSS/JS, no build step).
+(background jobs), `setup_check.py` + `routes_setup.py` (Setup panel, GPU probes),
+`fmc/` (FreeMoCap: `env.py` install/check, `runner.py` runs `fmc_headless.py`,
+`mocap.py` + `routes_mocap.py` calibration and processing), `static/` (plain
+HTML/CSS/JS, no build step; `setup.js` and `mocap.js` for the new parts).
