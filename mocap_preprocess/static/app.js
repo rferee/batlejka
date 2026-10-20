@@ -165,7 +165,8 @@ const STEPS = [
   { id: 'process', label: 'Process' },
   { id: 'cameras', label: 'Cameras' },
   { id: 'sync', label: 'Sync' },
-  { id: 'review', label: 'Review & export' },
+  { id: 'review', label: 'Review' },
+  { id: 'export', label: 'Export' },
 ];
 
 function stepEnabled(id) {
@@ -182,7 +183,8 @@ function stepDone(id) {
     case 'process': return !!st.processed_at;
     case 'cameras': return !!st.processed_at && (S.data?.cameras || []).length > 0;
     case 'sync': return !!st.synced_at;
-    case 'review': return !!st.exported_at;
+    case 'review': return (S.data?.takes || []).length > 0;
+    case 'export': return !!st.exported_at;
     default: return false;
   }
 }
@@ -1223,11 +1225,105 @@ function coverageText(cov) {
   return { ok: false, text: [`${ok}/${cov.length} cams`, ...missing.map((m) => `${m} missing`), ...padded].join(' · ') };
 }
 
+const padText = (c) => [
+  c.pre > 0.0005 ? `${c.pre.toFixed(2)} s black before` : '',
+  c.gap > 0.0005 ? `${c.gap.toFixed(2)} s black between files` : '',
+  c.post > 0.0005 ? `${c.post.toFixed(2)} s black after` : ''].filter(Boolean).join(' · ');
+
+// Takes and export options are edited on both Review and Export, so they live
+// here rather than in either screen, and are saved shortly after each change.
 const RV = {
   t: 0, playing: false, speed: 1, sel: null, pendingIn: null, pendingOut: null,
   takes: [], committed: [], undo: [], takesDirty: false, takesSaving: false,
-  pendingOffsets: new Map(), opts: null, optsDirty: false, advOpen: false,
+  pendingOffsets: new Map(), opts: null, optsDirty: false,
 };
+const saveTimers = {};
+const exportCams = () => RV.opts.camera_ids.filter((id) => cameraById(id));
+
+/** Take the session's takes and export options, unless edits to them aren't saved yet. */
+function loadTakes() {
+  if (!RV.takesDirty && !RV.takesSaving) {
+    RV.takes = clone(S.data.takes || []);
+    RV.committed = clone(RV.takes);
+  }
+  // a sync shifts takes on the server; undo entries from before it are in the old frame
+  if (RV.syncedAt !== undefined && RV.syncedAt !== S.data.state.synced_at) RV.undo = [];
+  RV.syncedAt = S.data.state.synced_at;
+  if (!RV.optsDirty) {
+    RV.opts = clone(S.data.export_options || {});
+    if (!Array.isArray(RV.opts.camera_ids)) RV.opts.camera_ids = S.data.cameras.filter((c) => c.include).map((c) => c.id);
+  }
+}
+/** Keep an edit of RV.takes for undo and save it shortly. */
+function commitTakeEdit() {
+  RV.takes.sort((x, y) => x.start - y.start);
+  RV.undo.push(RV.committed);
+  if (RV.undo.length > 60) RV.undo.shift();
+  RV.committed = clone(RV.takes);
+  queueTakesSave();
+}
+function queueTakesSave() {
+  RV.takesDirty = true;
+  clearTimeout(saveTimers.takes);
+  saveTimers.takes = setTimeout(() => saveTakes(), 400);
+}
+async function saveTakes(beacon = false) {
+  clearTimeout(saveTimers.takes);
+  if (!RV.takesDirty || !S.name) return;
+  RV.takesDirty = false;
+  const body = JSON.stringify(RV.takes);
+  if (beacon) {
+    fetch(sUrl('/takes'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+    return;
+  }
+  RV.takesSaving = true;
+  const name = S.name;
+  try {
+    const d = await api('PUT', sUrl('/takes'), JSON.parse(body));
+    if (S.name === name && S.data) {
+      S.data.takes = d.takes;
+      S.data.state = d.state;
+    }
+  } catch (e) {
+    if (S.name === name) {
+      RV.takesDirty = true;
+      clearTimeout(saveTimers.takes);
+      saveTimers.takes = setTimeout(() => saveTakes(), 3000); // retry
+    }
+    toast(`Couldn't save takes: ${e.message}`, 'error');
+  } finally {
+    RV.takesSaving = false;
+  }
+}
+function queueOptsSave() {
+  RV.optsDirty = true;
+  clearTimeout(saveTimers.opts);
+  saveTimers.opts = setTimeout(() => saveOpts(), 500);
+}
+async function saveOpts(beacon = false) {
+  clearTimeout(saveTimers.opts);
+  if (!RV.optsDirty || !S.name) return;
+  RV.optsDirty = false;
+  const body = JSON.stringify(RV.opts);
+  if (beacon) {
+    fetch(sUrl('/export_options'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+    return;
+  }
+  const name = S.name;
+  try {
+    const d = await api('PUT', sUrl('/export_options'), JSON.parse(body));
+    if (S.name === name && S.data) S.data.export_options = d.export_options;
+  } catch (e) { toast(e.message, 'error'); }
+}
+/** Switching sessions: send the old one's edits while sUrl() still points at it, then drop them. */
+function leaveTakes() {
+  saveTakes(true);
+  saveOpts(true);
+  Object.assign(RV, {
+    t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [],
+    takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined,
+  });
+}
 
 const ReviewScreen = {
   mount(root) {
@@ -1256,28 +1352,25 @@ const ReviewScreen = {
     });
     this.onKey = (e) => this.key(e);
     window.addEventListener('keydown', this.onKey);
-    this.adopt(true);
+    this.sideSel = null;    // reveal the selected take (e.g. picked on Export) once
+    this.adopt();
     this.renderAll();
   },
   unmount() {
     this.stop();
-    this.saveTakes(true);
+    this.sideTop = this.side.querySelector('.side-scroll')?.scrollTop || 0;
+    saveTakes();
     this.flushOffsets(true);
-    this.saveOpts(true);
     window.removeEventListener('keydown', this.onKey);
     this.grid.destroy();
     this.timeline.destroy();
   },
   sessionChanged() {
     this.stop();
-    this.saveTakes(true);
     this.flushOffsets(true);
-    this.saveOpts(true);
     clearTimeout(this.deferTimer);
-    Object.assign(RV, {
-      t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [],
-      takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined,
-    });
+    this.sideTop = 0;
+    leaveTakes();
   },
   /** True while the user is mid-gesture or typing — a re-render would lose it. */
   busy() {
@@ -1291,31 +1384,20 @@ const ReviewScreen = {
       this.deferTimer = setTimeout(() => { if (mounted === this) this.update(); }, 400);
       return;
     }
-    this.adopt(false);
+    this.adopt();
     this.renderAll();
   },
   onJobs() {
-    this.renderSideFoot();
     this.renderTransportButtons();
   },
 
   // ---------------------------------------------------------------- data
-  adopt(force) {
+  adopt() {
     if (!S.data) return;
-    if (force || (!RV.takesDirty && !RV.takesSaving)) {
-      RV.takes = clone(S.data.takes || []);
-      RV.committed = clone(RV.takes);
-    }
-    // a sync shifts takes on the server; undo entries from before it are in the old frame
-    if (RV.syncedAt !== undefined && RV.syncedAt !== S.data.state.synced_at) RV.undo = [];
-    RV.syncedAt = S.data.state.synced_at;
+    loadTakes();
     for (const [fid, off] of RV.pendingOffsets) {
       const f = fileById(fid);
       if (f) { f.offset = off; f.sync = { ...(f.sync || {}), method: 'manual' }; }
-    }
-    if (force || !RV.optsDirty) {
-      RV.opts = clone(S.data.export_options || {});
-      if (!Array.isArray(RV.opts.camera_ids)) RV.opts.camera_ids = S.data.cameras.filter((c) => c.include).map((c) => c.id);
     }
     if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
     if (RV.sel && RV.sel.kind === 'file' && !fileById(RV.sel.id)) RV.sel = null;
@@ -1605,51 +1687,18 @@ const ReviewScreen = {
     RV.takes = RV.undo.pop();
     RV.committed = clone(RV.takes);
     if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
+    queueTakesSave();
     this.takesChanged();
   },
   commitTakes() {
-    RV.takes.sort((x, y) => x.start - y.start);
-    RV.undo.push(RV.committed);
-    if (RV.undo.length > 60) RV.undo.shift();
-    RV.committed = clone(RV.takes);
+    commitTakeEdit();
     this.takesChanged();
   },
   takesChanged() {
-    RV.takesDirty = true;
-    clearTimeout(this.takesTimer);
-    this.takesTimer = setTimeout(() => this.saveTakes(), 400);
     this.refreshTimeline();
     this.renderSide();
     this.renderInspector();
     this.renderTransport();
-  },
-  async saveTakes(beacon = false) {
-    clearTimeout(this.takesTimer);
-    if (!RV.takesDirty || !S.name) return;
-    RV.takesDirty = false;
-    const body = JSON.stringify(RV.takes);
-    if (beacon) {
-      fetch(sUrl('/takes'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
-      return;
-    }
-    RV.takesSaving = true;
-    const name = S.name;
-    try {
-      const d = await api('PUT', sUrl('/takes'), JSON.parse(body));
-      if (S.name === name && S.data) {
-        S.data.takes = d.takes;
-        S.data.state = d.state;
-      }
-    } catch (e) {
-      if (S.name === name) {
-        RV.takesDirty = true;
-        clearTimeout(this.takesTimer);
-        this.takesTimer = setTimeout(() => this.saveTakes(), 3000); // retry
-      }
-      toast(`Couldn't save takes: ${e.message}`, 'error');
-    } finally {
-      RV.takesSaving = false;
-    }
   },
   renderSideSoon() {
     if (this.sideRaf) return;
@@ -1669,7 +1718,7 @@ const ReviewScreen = {
       if (!ok) return;
     }
     try {
-      await this.saveTakes();
+      await saveTakes();
       const d = await POST(sUrl('/takes/auto'), { replace: true });
       RV.undo.push(clone(RV.takes));
       S.data = d;
@@ -1732,24 +1781,24 @@ const ReviewScreen = {
   },
   async runSync() {
     await this.flushOffsets();
-    await this.saveTakes();
+    await saveTakes();
     await startJob('/sync', { resync_manual: false });
   },
 
-  // ---------------------------------------------------------------- export sidebar (left)
+  // ---------------------------------------------------------------- takes sidebar (left)
   renderSide() {
     const A = this.side;
-    const top = A.querySelector('.side-scroll')?.scrollTop || 0;   // re-rendering must not jump back up
+    const top = A.querySelector('.side-scroll')?.scrollTop ?? this.sideTop ?? 0;   // re-rendering must not jump back up
     A.innerHTML = '';
     const open = prefs.get('side', true);
     A.className = `side ${open ? '' : 'collapsed'}`;
     if (!open) {
       A.append(h('button', { class: 'side-expand', title: 'Expand sidebar', onclick: () => { prefs.set('side', true); this.renderSide(); } },
-        icon('angles-right'), h('span', null, 'Takes · Cameras · Export')));
+        icon('angles-right'), h('span', null, 'Takes')));
       return;
     }
     const fps = targetFps();
-    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
+    const camIds = exportCams();
     const takes = h('section', null,
       h('div', { class: 'section-title' }, 'Takes',
         h('div', { class: 'row', style: { gap: '10px' } },
@@ -1789,53 +1838,11 @@ const ReviewScreen = {
       h('span', { class: 'sub' }, `${fmtTC(tk.start, fps)} → ${fmtTC(tk.end, fps)} · ${(tk.end - tk.start).toFixed(1)}s`),
       h('span', { class: `cov ${cov.ok ? 'ok' : 'warn'}` }, cov.text)));
     }
-
-    const cams = h('section', null, h('span', { class: 'section-title' }, 'Cameras'));
-    for (const c of S.data.cameras) {
-      const on = camIds.includes(c.id);
-      cams.append(h('div', {
-        class: 'cam-row', onclick: () => {
-          RV.opts.camera_ids = on ? camIds.filter((x) => x !== c.id) : S.data.cameras.map((x) => x.id).filter((x) => x === c.id || camIds.includes(x));
-          this.optsChanged();
-        },
-      }, h('span', { class: `check ${on ? 'on' : ''}` }, icon('check')),
-      h('span', { style: { flex: 1 }, class: 'ellipsis' }, c.name),
-      h('span', { class: 'note' }, `${c.rotation}°`)));
-    }
-
-    const o = RV.opts;
-    const seg = (key, values, label = (v) => String(v)) => h('div', { class: 'seg' },
-      values.map((v) => h('button', { class: o[key] === v ? 'on' : '', onclick: () => { o[key] = v; this.optsChanged(); } }, label(v))));
-    const q = o.encoder === 'h264_nvenc' ? `cq ${Number(o.crf) + 2}` : `crf ${o.crf}`;
-    const out = h('section', null,
-      h('span', { class: 'section-title' }, 'Output'),
-      h('div', { class: 'col', style: { gap: '6px', fontSize: '11px', color: 'var(--fg-2)' } }, 'Encoder',
-        seg('encoder', ['libx264', 'h264_nvenc']),
-        o.encoder === 'h264_nvenc' ? seg('nvenc_preset', ['p5', 'p4', 'p3'], (v) => ({ p5: 'p5 quality', p4: 'p4', p3: 'p3 fast' })[v]) : null,
-        h('span', { class: 'note' }, `h264 · ${q} · yuv420p · ${fpsLabel(fps)} fps · ${o.long_side ? `${o.long_side}px long side` : 'source size'}`
-          + (o.encoder === 'h264_nvenc' ? ' · NVENC is usually the bottleneck: p3 is about twice as fast as p5 at 4K, slightly bigger files' : ''))),
-      h('div', { class: 'col', style: { gap: '6px', fontSize: '11px', color: 'var(--fg-2)' } }, 'Files at once',
-        seg('parallel', [1, 2, 3]),
-        h('span', { class: 'note' }, 'only helps if the encoder isn\'t already saturated: a GPU with one NVENC (e.g. RTX 3090) still encodes one file at a time, and libx264 already uses every core')),
-      h('button', { class: 'adv-toggle', onclick: () => { RV.advOpen = !RV.advOpen; this.renderSide(); } },
-        icon(RV.advOpen ? 'chevron-down' : 'chevron-right'), 'Advanced'),
-      RV.advOpen ? h('div', { class: 'col' },
-        h('label', { class: 'kv' }, 'Target fps', h('span', null, `${fpsLabel(fps)} (session)`)),
-        h('div', { class: 'kv' }, 'Long side', seg('long_side', [0, 1920, 1280, 1080], (v) => (v ? String(v) : 'keep'))),
-        h('label', { class: 'kv' }, o.encoder === 'h264_nvenc' ? 'CQ (−2)' : 'CRF',
-          h('input', { class: 'input sm', type: 'number', min: '0', max: '51', value: o.crf, onchange: (e) => { o.crf = Math.max(0, Math.min(51, Number(e.target.value) || 17)); this.optsChanged(); } })),
-        h('div', { class: 'kv' }, 'Layout', seg('layout', ['freemocap', 'flat'])),
-        h('div', { class: 'toggle', onclick: () => { o.audio = !o.audio; this.optsChanged(); } },
-          h('span', { class: `check ${o.audio ? 'on' : ''}` }, icon('check')), 'include audio'),
-        h('div', { class: 'toggle', onclick: () => { o.overwrite = !o.overwrite; this.optsChanged(); } },
-          h('span', { class: `check ${o.overwrite ? 'on' : ''}` }, icon('check')), 'overwrite existing files')) : null,
-      this.tree(camIds));
-    const scroll = h('div', { class: 'side-scroll' }, takes, cams, out);
-    this.foot = h('div', { class: 'side-foot' });
-    A.append(scroll, this.foot);
-    this.renderSideFoot();     // before measuring: it takes height from the list
+    const scroll = h('div', { class: 'side-scroll' }, takes);
+    A.append(scroll, h('div', { class: 'side-foot' },
+      h('button', { class: 'btn primary', onclick: () => go('export') }, 'Continue to export', icon('arrow-right'))));
     scroll.scrollTop = top;
-    // a take selected elsewhere (timeline, J / L) is scrolled into view
+    // a take selected elsewhere (timeline, J / L, Export) is scrolled into view
     const selId = RV.sel && RV.sel.kind === 'take' ? RV.sel.id : null;
     const row = selId && selId !== this.sideSel ? scroll.querySelector('.take-row.sel') : null;
     if (row) {
@@ -1845,83 +1852,6 @@ const ReviewScreen = {
       else if (r.bottom > b.bottom) scroll.scrollTop += r.bottom - b.bottom + 8;
     }
     this.sideSel = selId;
-  },
-  tree(camIds) {
-    const lines = [{ t: `sessions/${S.name}/`, c: '#d3d3d3' }, { t: `├ source/  (${S.data.files.length} files, untouched)`, c: '#7a7a7a' }, { t: '└ output/', c: '#f1f1f1' }];
-    const takes = RV.takes.filter((t) => t.export);
-    const cams = camIds.map((id) => cameraById(id)).filter(Boolean);
-    const fm = RV.opts.layout !== 'flat';
-    takes.forEach((tk, i) => {
-      const last = i === takes.length - 1;
-      const bar = last ? ' ' : '│';
-      lines.push({ t: `  ${last ? '└' : '├'} ${tk.name}/`, c: '#f1f1f1' });
-      if (fm) lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' }, { t: `  ${bar} └ synchronized_videos/`, c: '#d3d3d3' });
-      else lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' });
-      cams.forEach((c, j) => {
-        const lastC = j === cams.length - 1;
-        lines.push({ t: `  ${bar} ${fm ? '  ' : ''}${lastC ? '└' : '├'} ${c.name}_synced.mp4`, c: '#E89768' });
-      });
-    });
-    if (!takes.length || !cams.length) lines.push({ t: '    (nothing selected)', c: '#7a7a7a' });
-    return h('div', { class: 'tree' }, lines.map((l) => h('span', { style: { color: l.c } }, l.t)));
-  },
-  renderSideFoot() {
-    const F = this.foot;
-    if (!F || !F.isConnected) return;
-    F.innerHTML = '';
-    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
-    const takes = RV.takes.filter((t) => t.export);
-    const n = takes.length * camIds.length;
-    const job = activeJob('export');
-    const last = lastJob('export');
-    if (job) {
-      F.append(h('div', { class: 'col', style: { gap: '6px' } },
-        h('div', { class: 'progress-label' }, h('span', { class: 'ellipsis' }, job.message || 'starting…'), h('span', null, `${Math.round(job.progress * 100)}%`)),
-        h('div', { class: 'progress thin' }, h('div', { style: { width: `${job.progress * 100}%` } }))));
-    } else if (last && last.status !== 'running') {
-      const ok = last.status === 'done' && !(last.result && last.result.errors);
-      F.append(h('div', { class: 'col', style: { gap: '6px' } },
-        h('div', { class: 'progress-label' },
-          h('span', { class: ok ? 'ok' : 'warn' }, last.status === 'done'
-            ? (last.result && last.result.errors ? `done with ${last.result.errors} error(s) — see job log` : `wrote ${last.result ? last.result.written : ''} files`)
-            : last.status),
-          h('a', { href: '#', onclick: (e) => { e.preventDefault(); reveal('output'); } }, 'Open output folder')),
-        h('div', { class: `progress thin ${ok ? 'done' : ''}` }, h('div', { style: { width: '100%' } }))));
-    }
-    F.append(job
-      ? h('button', { class: 'btn primary', onclick: () => cancelJob(job.id) }, icon('xmark'), 'Cancel export')
-      : h('button', { class: 'btn primary', disabled: !n, onclick: () => this.exportNow() }, icon('file-export'),
-        n ? `Export ${n} file${n === 1 ? '' : 's'}` : 'Nothing to export'));
-  },
-  optsChanged() {
-    RV.optsDirty = true;
-    clearTimeout(this.optsTimer);
-    this.optsTimer = setTimeout(() => this.saveOpts(), 500);
-    this.renderSide();
-  },
-  async saveOpts(beacon = false) {
-    clearTimeout(this.optsTimer);
-    if (!RV.optsDirty || !S.name) return;
-    RV.optsDirty = false;
-    const body = JSON.stringify(RV.opts);
-    if (beacon) {
-      fetch(sUrl('/export_options'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
-      return;
-    }
-    const name = S.name;
-    try {
-      const d = await api('PUT', sUrl('/export_options'), JSON.parse(body));
-      if (S.name === name && S.data) S.data.export_options = d.export_options;
-    } catch (e) { toast(e.message, 'error'); }
-  },
-  async exportNow() {
-    await this.saveTakes();
-    await this.flushOffsets();
-    await this.saveOpts();
-    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
-    const takeIds = RV.takes.filter((t) => t.export).map((t) => t.id);
-    const job = await startJob('/export', { take_ids: takeIds, camera_ids: camIds, options: RV.opts });
-    if (job) this.renderSideFoot();
   },
 
   // ---------------------------------------------------------------- inspector (right)
@@ -2018,8 +1948,7 @@ const ReviewScreen = {
   },
   inspTake(I, tk, collapse) {
     const fps = fpsFloat(targetFps()) || 30;
-    const camIds = RV.opts.camera_ids.filter((id) => cameraById(id));
-    const cov = takeCoverage(tk, camIds);
+    const cov = takeCoverage(tk, exportCams());
     const num = (key) => h('input', {
       class: 'input sm', type: 'number', step: (1 / fps).toFixed(4), value: tk[key].toFixed(3),
       onchange: (e) => {
@@ -2048,10 +1977,7 @@ const ReviewScreen = {
           h('b', null, c.cam?.name || '?'), h('span', { class: 'spacer' }),
           h('span', { class: 'muted' }, c.missing ? 'no footage — skipped' : c.padded ? 'padded' : 'full')),
         (c.files || []).map((f) => h('span', { class: 'muted ellipsis', title: f.rel }, basename(f.rel))),
-        c.padded ? h('span', { class: 'warn' }, [
-          c.pre > 0.0005 ? `${c.pre.toFixed(2)} s black before` : '',
-          c.gap > 0.0005 ? `${c.gap.toFixed(2)} s black between files` : '',
-          c.post > 0.0005 ? `${c.post.toFixed(2)} s black after` : ''].filter(Boolean).join(' · ')) : null))),
+        c.padded ? h('span', { class: 'warn' }, padText(c)) : null))),
     h('div', { class: 'row', style: { gap: '6px' } },
       h('button', { class: 'btn sm', onclick: () => this.seek(tk.start) }, icon('backward-step'), 'Go to in'),
       h('button', { class: 'btn sm', onclick: () => this.seek(tk.end) }, 'Go to out', icon('forward-step')),
@@ -2060,12 +1986,210 @@ const ReviewScreen = {
 };
 screens.review = ReviewScreen;
 window.addEventListener('beforeunload', () => {
-  if (mounted === ReviewScreen) {
-    ReviewScreen.saveTakes(true);
-    ReviewScreen.flushOffsets(true);
-    ReviewScreen.saveOpts(true);
-  }
+  saveTakes(true);
+  saveOpts(true);
+  if (mounted === ReviewScreen) ReviewScreen.flushOffsets(true);
 });
+
+// ------------------------------------------------------------------ Export screen
+const ExportScreen = {
+  mount(root) {
+    this.root = h('main', { class: 'page' });
+    root.append(this.root);
+    this.update();
+  },
+  unmount() {
+    saveTakes();
+    saveOpts();
+  },
+  sessionChanged() { leaveTakes(); },
+  update() {
+    if (!S.data) return;
+    loadTakes();
+    const a = document.activeElement;
+    if (a && this.root.contains(a) && a.tagName === 'INPUT') return;   // keep a half-typed value
+    this.render();
+  },
+  onJobs() { this.renderAction(); },
+  takesEdited() { commitTakeEdit(); this.render(); },
+  optsChanged() { queueOptsSave(); this.render(); },
+
+  render() {
+    const r = this.root;
+    const keep = [r.scrollTop, this.tableBox?.scrollTop || 0, this.treeBox?.scrollTop || 0];  // re-rendering must not jump
+    r.innerHTML = '';
+    this.tableBox = this.treeBox = null;
+    if (!S.data) return;
+    const camIds = exportCams();
+    this.action = h('div', { class: 'row export-action' });
+    r.append(
+      h('div', { class: 'page-head' },
+        h('h1', null, 'Export'),
+        h('p', null, 'Every ticked take × camera becomes one file in ', h('span', { class: 'accent' }, 'output/<take>/'),
+          '. All files of a take get the same length: black and silence fill in where a camera has no footage.')),
+      this.action,
+      RV.takes.length
+        ? h('div', { class: 'export-split' }, this.takesTable(camIds), this.settings(camIds))
+        : h('div', { class: 'empty' }, 'No takes yet — make them in Review: drag in the takes row, mark I / O and press N, or use Auto-detect takes. ',
+          h('button', { class: 'btn sm', onclick: () => go('review') }, 'Open Review', icon('arrow-right'))));
+    this.renderAction();
+    r.scrollTop = keep[0];
+    if (this.tableBox) this.tableBox.scrollTop = keep[1];
+    if (this.treeBox) this.treeBox.scrollTop = keep[2];
+  },
+  /** Files the export would write (cameras without footage in a take are skipped). */
+  count(camIds) {
+    let files = 0;
+    let skipped = 0;
+    let length = 0;
+    for (const tk of RV.takes) {
+      if (!tk.export) continue;
+      length += tk.end - tk.start;
+      for (const c of takeCoverage(tk, camIds)) if (c.missing) skipped++; else files++;
+    }
+    return { files, skipped, length };
+  },
+  takesTable(camIds) {
+    const fps = targetFps();
+    const cams = S.data.cameras;
+    const nOn = RV.takes.filter((t) => t.export).length;
+    const { skipped, length } = this.count(camIds);
+    const setAll = (on) => { RV.takes.forEach((t) => { t.export = on; }); this.takesEdited(); };
+    const cell = (c) => {
+      if (c.missing) return h('span', { class: 'xcov err' }, h('span', { class: 'dot sq', style: { background: '#E56767' } }), 'none');
+      return h('span', { class: `xcov ${c.padded ? 'warn' : ''}` },
+        h('span', { class: 'dot sq', style: { background: c.padded ? '#E89768' : '#97d47d' } }),
+        c.padded ? `+${(c.pre + c.gap + c.post).toFixed(1)} s` : 'full',
+        c.files.length > 1 ? h('span', { class: 'note' }, `${c.files.length} files`) : null);
+    };
+    const tip = (c) => (c.missing ? 'no footage — skipped' : [...c.files.map((f) => basename(f.rel)), padText(c)].filter(Boolean).join('\n'));
+    const rows = RV.takes.map((tk) => {
+      const cov = takeCoverage(tk, cams.map((c) => c.id));
+      return h('tr', { class: tk.export ? '' : 'off', onclick: () => { tk.export = !tk.export; this.takesEdited(); } },
+        h('td', { class: 'ck' }, h('span', { class: `check ${tk.export ? 'on' : ''}` }, icon('check'))),
+        h('td', { class: 'nm', title: tk.name }, tk.name),
+        h('td', null, `${fmtTC(tk.start, fps)} → ${fmtTC(tk.end, fps)}`),
+        h('td', { class: 'num' }, fmtDur(tk.end - tk.start)),
+        cov.map((c, i) => h('td', { class: camIds.includes(cams[i].id) ? '' : 'off', title: tip(c) }, cell(c))),
+        h('td', { class: 'ck' }, h('button', {
+          class: 'mini-btn', title: 'Show in Review', onclick: (e) => { e.stopPropagation(); this.showInReview(tk); },
+        }, icon('eye'))));
+    });
+    this.tableBox = h('div', { class: 'tablewrap' }, h('table', { class: 'ftable xtable' },
+      h('thead', null, h('tr', null,
+        h('th', null, ''), h('th', null, 'take'), h('th', null, 'in → out'), h('th', { class: 'num' }, 'length'),
+        cams.map((c) => {
+          const on = camIds.includes(c.id);
+          return h('th', { class: `cam ${on ? '' : 'off'}`, title: on ? 'Leave this camera out' : 'Include this camera', onclick: () => this.toggleCam(c.id) },
+            h('span', { class: 'xcov' }, h('span', { class: `check ${on ? 'on' : ''}` }, icon('check')), c.name));
+        }),
+        h('th', null, ''))),
+      h('tbody', null, rows)));
+    return h('div', { class: 'col', style: { gap: '10px', minWidth: 0 } },
+      h('div', { class: 'row', style: { gap: '6px' } },
+        h('button', { class: 'btn xs', disabled: nOn === RV.takes.length, onclick: () => setAll(true) }, 'Select all'),
+        h('button', { class: 'btn xs', disabled: !nOn, onclick: () => setAll(false) }, 'Deselect all'),
+        h('span', { class: 'note' }, `${nOn}/${RV.takes.length} takes · ${camIds.length}/${cams.length} cameras · ${fmtDur(length)} per camera`),
+        skipped ? h('span', { class: 'small warn' }, `${skipped} skipped (no footage)`) : null,
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'note' }, 'click a take or a camera to leave it out')),
+      this.tableBox);
+  },
+  toggleCam(cid) {
+    const ids = exportCams();
+    RV.opts.camera_ids = ids.includes(cid) ? ids.filter((x) => x !== cid) : S.data.cameras.map((x) => x.id).filter((x) => x === cid || ids.includes(x));
+    this.optsChanged();
+  },
+  showInReview(tk) {
+    RV.sel = { kind: 'take', id: tk.id };
+    RV.pendingIn = RV.pendingOut = null;
+    RV.t = tk.start;
+    go('review');
+  },
+  settings(camIds) {
+    const o = RV.opts;
+    const fps = targetFps();
+    const nv = o.encoder === 'h264_nvenc';
+    const seg = (key, values, label = (v) => String(v)) => h('div', { class: 'seg' },
+      values.map((v) => h('button', { class: o[key] === v ? 'on' : '', onclick: () => { o[key] = v; this.optsChanged(); } }, label(v))));
+    const toggle = (key, label) => h('div', { class: 'toggle', onclick: () => { o[key] = !o[key]; this.optsChanged(); } },
+      h('span', { class: `check ${o[key] ? 'on' : ''}` }, icon('check')), label);
+    this.treeBox = this.tree(camIds);
+    return h('div', { class: 'export-side' },
+      h('div', { class: 'card' },
+        h('span', { class: 'card-title' }, 'Output'),
+        h('div', { class: 'col', style: { gap: '10px' } },
+          h('div', { class: 'kv' }, 'Encoder', seg('encoder', ['libx264', 'h264_nvenc'])),
+          nv ? h('div', { class: 'kv' }, 'Preset', seg('nvenc_preset', ['p5', 'p4', 'p3'], (v) => ({ p5: 'p5 quality', p4: 'p4', p3: 'p3 fast' })[v])) : null,
+          h('label', { class: 'kv' }, nv ? 'CQ (−2)' : 'CRF',
+            h('input', { class: 'input sm', type: 'number', min: '0', max: '51', value: o.crf, onchange: (e) => { o.crf = Math.max(0, Math.min(51, Number(e.target.value) || 17)); this.optsChanged(); } })),
+          h('div', { class: 'kv' }, 'Long side', seg('long_side', [0, 1920, 1280, 1080], (v) => (v ? String(v) : 'keep'))),
+          h('div', { class: 'kv' }, 'Files at once', seg('parallel', [1, 2, 3])),
+          h('div', { class: 'kv' }, 'Layout', seg('layout', ['freemocap', 'flat'])),
+          h('div', { class: 'kv' }, 'Target fps', h('span', null, `${fpsLabel(fps)} (session)`)),
+          toggle('audio', 'include audio'),
+          toggle('overwrite', 'overwrite existing files')),
+        h('div', { class: 'col', style: { gap: '6px', lineHeight: '1.5' } },
+          h('span', { class: 'note' }, `h264 · ${nv ? `cq ${Number(o.crf) + 2}` : `crf ${o.crf}`} · yuv420p · ${fpsLabel(fps)} fps · ${o.long_side ? `${o.long_side}px long side` : 'source size'}`),
+          nv ? h('span', { class: 'note' }, 'NVENC is usually the bottleneck: p3 is about twice as fast as p5 at 4K, slightly bigger files.') : null,
+          h('span', { class: 'note' }, 'Files at once only helps if the encoder isn\'t already saturated: a GPU with one NVENC (e.g. RTX 3090) still encodes one file at a time, and libx264 already uses every core.'))),
+      h('div', { class: 'card' }, h('span', { class: 'card-title' }, 'Folders'), this.treeBox));
+  },
+  tree(camIds) {
+    const lines = [{ t: `sessions/${S.name}/`, c: '#d3d3d3' }, { t: `├ source/  (${S.data.files.length} files, untouched)`, c: '#7a7a7a' }, { t: '└ output/', c: '#f1f1f1' }];
+    const takes = RV.takes.filter((t) => t.export);
+    const cams = camIds.map((id) => cameraById(id)).filter(Boolean);
+    const fm = RV.opts.layout !== 'flat';
+    takes.forEach((tk, i) => {
+      const last = i === takes.length - 1;
+      const bar = last ? ' ' : '│';
+      lines.push({ t: `  ${last ? '└' : '├'} ${tk.name}/`, c: '#f1f1f1' });
+      if (fm) lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' }, { t: `  ${bar} └ synchronized_videos/`, c: '#d3d3d3' });
+      else lines.push({ t: `  ${bar} ├ take_info.json`, c: '#7a7a7a' });
+      cams.forEach((c, j) => {
+        const lastC = j === cams.length - 1;
+        lines.push({ t: `  ${bar} ${fm ? '  ' : ''}${lastC ? '└' : '├'} ${c.name}_synced.mp4`, c: '#E89768' });
+      });
+    });
+    if (!takes.length || !cams.length) lines.push({ t: '    (nothing selected)', c: '#7a7a7a' });
+    return h('div', { class: 'tree export-tree' }, lines.map((l) => h('span', { style: { color: l.c } }, l.t)));
+  },
+  renderAction() {
+    const A = this.action;
+    if (!A || !A.isConnected) return;
+    A.innerHTML = '';
+    const { files } = this.count(exportCams());
+    const job = activeJob('export');
+    const last = lastJob('export');
+    A.append(job
+      ? h('button', { class: 'btn primary big', onclick: () => cancelJob(job.id) }, icon('xmark'), 'Cancel export')
+      : h('button', { class: 'btn primary big', disabled: !files, onclick: () => this.exportNow() }, icon('file-export'),
+        files ? `Export ${files} file${files === 1 ? '' : 's'}` : 'Nothing to export'));
+    if (job) {
+      A.append(h('div', { class: 'col export-status' },
+        h('div', { class: 'progress-label' }, h('span', { class: 'ellipsis' }, job.message || 'starting…'), h('span', null, `${Math.round(job.progress * 100)}%`)),
+        h('div', { class: 'progress thin' }, h('div', { style: { width: `${job.progress * 100}%` } }))));
+    } else if (last) {
+      const ok = last.status === 'done' && !(last.result && last.result.errors);
+      A.append(h('div', { class: 'col export-status' },
+        h('div', { class: 'progress-label' },
+          h('span', { class: ok ? 'ok' : 'warn' }, last.status === 'done'
+            ? (last.result && last.result.errors ? `done with ${last.result.errors} error(s) — see job log` : `wrote ${last.result ? last.result.written : ''} files`)
+            : last.status)),
+        h('div', { class: `progress thin ${ok ? 'done' : ''}` }, h('div', { style: { width: '100%' } }))));
+    }
+    A.append(h('span', { class: 'spacer' }),
+      h('button', { class: 'btn sm', onclick: () => reveal('output') }, icon('folder-open'), 'Open output folder'));
+  },
+  async exportNow() {
+    await saveTakes();
+    await saveOpts();
+    const takeIds = RV.takes.filter((t) => t.export).map((t) => t.id);
+    const job = await startJob('/export', { take_ids: takeIds, camera_ids: exportCams(), options: RV.opts });
+    if (job) this.renderAction();
+  },
+};
+screens.export = ExportScreen;
 
 // ------------------------------------------------------------------ placeholder screens (filled in later milestones)
 for (const id of ['cameras', 'sync', 'review']) {

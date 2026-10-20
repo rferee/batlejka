@@ -357,6 +357,25 @@ table.ftable tr:hover td { background: rgba(255,255,255,0.02); }
 .adv-toggle:hover { color: var(--accent); }
 .kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 11px; color: var(--fg-2); }
 
+/* ---------------------------------------------------------------- export */
+.export-action { gap: 20px; }
+.export-status { flex: 1; max-width: 560px; gap: 6px; }
+.export-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 32px; align-items: start; }
+.export-split .tablewrap { max-height: calc(100vh - 360px); min-height: 160px; }
+.export-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+@media (max-width: 1500px) {   /* the table needs the width: settings go below it */
+  .export-split { grid-template-columns: minmax(0, 1fr); }
+  .export-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+}
+table.xtable tbody tr { cursor: pointer; }
+table.xtable td.ck { width: 1%; }
+table.xtable .num { text-align: right; }
+table.xtable th.cam { cursor: pointer; user-select: none; }
+table.xtable th.cam:hover { color: var(--fg-1); }
+table.xtable tr.off td:not(.ck), table.xtable .off { opacity: .35; }
+.xcov { display: inline-flex; align-items: center; gap: 6px; }
+.export-tree { max-height: 40vh; overflow: auto; }
+
 .rv-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .stage { flex: 1; min-height: 160px; display: flex; }
 .grid { flex: 1; min-width: 0; display: grid; gap: 1px; background: var(--hairline); overflow: hidden; }

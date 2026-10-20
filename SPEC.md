@@ -364,7 +364,7 @@ Layout per the reference sketch:
   the continuous Fuji, clusters of short bars for the phones), with waveforms inside the
   bars. Colour the bars by sync method (reference/audio = normal, metadata = amber,
   none = red, manual = blue).
-- **Right: export sidebar** (§7.5).
+- **Left: takes list** (checkbox, name, duration, coverage); export is its own step (§7.5).
 
 Interactions:
 - Click/drag in the ruler or on empty track space → move the playhead (scrub).
@@ -395,10 +395,13 @@ Interactions:
   Check whether the installed Starlette `FileResponse` handles Range. If it doesn't,
   implement a small range-serving endpoint.
 
-### 7.5 Export sidebar
-- Takes list: checkbox, name (editable), duration, and coverage ("5/5 cams" or a warning
-  listing cameras that are missing or would be padded).
-- Camera checkboxes (default = the camera's `include`).
+### 7.5 Export step
+(A sidebar at first; it moved to its own step after Review because the sidebar was too
+cramped.)
+- Takes × cameras table: a row per take (checkbox, name, in → out, duration) and a
+  column per camera (checkbox in the header, default = the camera's `include`); each
+  cell shows that camera's coverage of the take (full / padded by how much / joined
+  from N files / missing → skipped). Select all / deselect all.
 - Options: target fps (shows the session's), long side (keep / 1920 / 1280 / 1080),
   encoder (libx264 / h264_nvenc), quality (CRF/CQ), include audio, layout
   (freemocap / flat), overwrite existing.

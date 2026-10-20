@@ -56,7 +56,7 @@ sessions/<name>/
 
 ## Workflow
 
-The header has five steps; a step unlocks once its prerequisites exist.
+The header has six steps; a step unlocks once its prerequisites exist.
 The URL (`#/<session>/<step>`) can be bookmarked.
 
 1. **Session** — pick a folder in `sessions/` (or create one) and drop the
@@ -102,8 +102,8 @@ The URL (`#/<session>/<step>`) can be bookmarked.
    - Checks: clips of one camera never overlap, and files further than W from
      their camera's clock are flagged (⚠ in *Offsets*, and in the inspector).
    - Manual offsets are never touched unless you tick *re-sync manual files*.
-5. **Review & export** — the main screen: camera grid on top, timeline below,
-   takes / cameras / output on the left, an inspector on the right.
+5. **Review** — the main screen: camera grid on top, timeline below, the takes
+   on the left, an inspector on the right.
    - Scrub by clicking/dragging the ruler or the lanes; wheel zooms, Shift+wheel
      pans, **Fit** shows everything.
    - Clip bars are coloured by placement: grey = audio/reference, orange = full
@@ -123,13 +123,20 @@ The URL (`#/<session>/<step>`) can be bookmarked.
      playhead) · K deselect · Enter rename the selected take · Del delete take · Home/End · F fit · Ctrl+Z undo
      take edits · Esc deselect and clear marks.
    - The sidebar shows per-take coverage ("4/4 cams", or which camera is missing
-     or will be padded), *Select all* / *Deselect all* for the export checkboxes,
-     and a preview of the output tree. **Export** writes one folder per take;
-     every file is checked to have exactly `round(duration × fps)` frames.
+     or will be padded) and the export checkboxes, with *Select all* /
+     *Deselect all*.
    - A take that spans several files of one camera (it stopped and restarted
      recording) uses all of them, joined in order with black and silence for the
      break. The inspector lists the files and how much black goes before,
      between and after them.
+6. **Export** — a table of takes (rows) × cameras (columns): click a take or a
+   camera to leave it out, *Select all* / *Deselect all* for the takes. Each
+   cell shows that camera's coverage (*full*, the seconds of black it gets, how
+   many files are joined, or *none* when it has no footage and is skipped; hover
+   for the files), and the eye opens the take in Review. Output options and a
+   preview of the folder tree are on the right. **Export** writes one folder
+   per take; every file is checked to have exactly `round(duration × fps)`
+   frames.
 
 ## Bringing exports into FreeMoCap
 
