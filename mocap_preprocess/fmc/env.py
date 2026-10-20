@@ -85,9 +85,16 @@ def uv_bin() -> str | None:
         return shutil.which("uv")
 
 
+def uv_cache_dir() -> Path:
+    return config.tools_dir() / "uv-cache"
+
+
 def uv_env() -> dict:
     env = dict(os.environ)
     env["UV_PYTHON_INSTALL_DIR"] = str(python_dir())
+    # uv's default cache is on C: (%LOCALAPPDATA%); the env is several GB of wheels, so keep
+    # it next to the venv: same drive, so uv can hardlink instead of copying.
+    env["UV_CACHE_DIR"] = str(uv_cache_dir())
     env["UV_PYTHON_PREFERENCE"] = "only-managed"   # never pick up a system Python
     env["NO_COLOR"] = "1"
     env.pop("VIRTUAL_ENV", None)                    # the app's own venv must not leak into uv

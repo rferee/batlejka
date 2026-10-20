@@ -111,7 +111,8 @@ def headless_argv(cmd: str, *args) -> list[str]:
 
 # Spawned tracking workers re-import freemocap/skellytracker, which resets their console
 # logging to DEBUG on stdout; those lines are noise in the job log (the log file keeps them).
-_FMC_LOG = re.compile(r"\[\s*(TRACE|DEBUG|INFO|WARNING|SUCCESS)\]| - (DEBUG|INFO|WARNING) - ")
+_FMC_LOG = re.compile(r"\[\s*(TRACE|DEBUG|INFO|WARNING|SUCCESS)\]| - (DEBUG|INFO|WARNING) - "
+                      r"|^(Thank you for using |This is printing from: |Source code for this package |adding base_package_path: )")
 
 
 def _text_level(line: str, stream: str) -> str:
