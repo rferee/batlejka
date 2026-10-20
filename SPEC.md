@@ -276,9 +276,15 @@ automatic match is wrong (e.g. loopy music matching one bar off).
 
 ### 6.6 Export (`exporter.py`)
 For each selected take and each included camera:
-- Find the camera's file with the most overlap with `[take.start, take.end]`.
+- Use every file of the camera that overlaps `[take.start, take.end]`, in order.
   No overlap: skip and report. Partial overlap: pad with black (and silence) so every
-  camera has exactly the same length.
+  camera has exactly the same length; the same for breaks between files.
+- Several files: lay them out in output frames — file k covers
+  `[max(prev_end, round(s_k·fps)), min(N, round(e_k·fps)))` with `s_k, e_k` its start/end
+  in take time (an overlapping file starts where the previous one ends) — and join one
+  chain per file (`fps, scale, rotation, tpad=start=<break frames>, trim`) with
+  `concat`. Audio: one input per file, delayed to the file's exact start (samples),
+  silence for files without audio. Single file: the command below.
 - `in_t = take.start − file.offset`; `pre_pad = max(0, −in_t)`; `seek = max(0, in_t)`;
   `N = round((take.end − take.start) × target_fps)`; `post_pad` = whatever the file is
   missing at the end (+1 frame for safety).
@@ -303,7 +309,8 @@ ffmpeg -y [-hwaccel cuda] -ss <seek> -i SRC
   - `freemocap` (default): `output/<take>/synchronized_videos/<camera>_synced.mp4`
   - `flat`: `output/<take>/<camera>_synced.mp4`
 - Also write `output/<take>/take_info.json` (take bounds, fps, for each camera the
-  source file, offset, sync method/score, rotation, pre/post padding).
+  source file, offset, sync method/score, rotation, pre/post padding, and `sources`:
+  every file used with its seek, break and frame count).
 - After each take, verify with ffprobe that all outputs have exactly `N` frames. Report
   any mismatch as an error in the job log.
 - Sanitize take and camera names for Windows filenames.

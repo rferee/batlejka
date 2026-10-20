@@ -1192,28 +1192,32 @@ function sessionSpan() {
   return end || 60;
 }
 
-/** Which file covers each camera for a take, and how much padding it needs. */
+/** Which files cover each camera for a take (all that overlap it, joined on
+ *  export), and how much black it needs before, between and after them. */
 export function takeCoverage(tk, camIds) {
   const fps = fpsFloat(targetFps()) || 30;
   return camIds.map((cid) => {
     const cam = cameraById(cid);
-    let best = null;
-    let bestOv = 0;
-    for (const f of videoFiles()) {
-      if (f.camera !== cid || f.offset == null) continue;
-      const ov = Math.min(tk.end, f.offset + f.probe.duration) - Math.max(tk.start, f.offset);
-      if (ov > bestOv) { bestOv = ov; best = f; }
+    const files = videoFiles()
+      .filter((f) => f.camera === cid && f.offset != null
+        && Math.min(tk.end, f.offset + f.probe.duration) - Math.max(tk.start, f.offset) >= 1 / fps)
+      .sort((a, b) => a.offset - b.offset);
+    if (!files.length) return { cam, missing: true };
+    let reach = tk.start;
+    let gap = 0;
+    for (const f of files) {
+      if (reach > tk.start) gap += Math.max(0, f.offset - reach);
+      reach = Math.max(reach, Math.min(tk.end, f.offset + f.probe.duration));
     }
-    if (!best) return { cam, missing: true };
-    const pre = Math.max(0, best.offset - tk.start);
-    const post = Math.max(0, tk.end - (best.offset + best.probe.duration));
-    return { cam, file: best, pre, post, padded: pre > 0.5 / fps || post > 0.5 / fps };
+    const pre = Math.max(0, files[0].offset - tk.start);
+    const post = Math.max(0, tk.end - reach);
+    return { cam, files, pre, gap, post, padded: pre + gap + post > 0.5 / fps };
   });
 }
 
 function coverageText(cov) {
   const missing = cov.filter((c) => c.missing).map((c) => c.cam?.name || '?');
-  const padded = cov.filter((c) => !c.missing && c.padded).map((c) => `${c.cam?.name} +${(c.pre + c.post).toFixed(1)}s pad`);
+  const padded = cov.filter((c) => !c.missing && c.padded).map((c) => `${c.cam?.name} +${(c.pre + c.gap + c.post).toFixed(1)}s pad`);
   const ok = cov.length - missing.length;
   if (!missing.length && !padded.length) return { ok: true, text: `${ok}/${cov.length} cams` };
   return { ok: false, text: [`${ok}/${cov.length} cams`, ...missing.map((m) => `${m} missing`), ...padded].join(' · ') };
@@ -1735,6 +1739,7 @@ const ReviewScreen = {
   // ---------------------------------------------------------------- export sidebar (left)
   renderSide() {
     const A = this.side;
+    const top = A.querySelector('.side-scroll')?.scrollTop || 0;   // re-rendering must not jump back up
     A.innerHTML = '';
     const open = prefs.get('side', true);
     A.className = `side ${open ? '' : 'collapsed'}`;
@@ -1753,6 +1758,14 @@ const ReviewScreen = {
     if (!RV.takes.length) {
       takes.append(h('div', { class: 'note', style: { lineHeight: '1.5' } },
         'No takes yet. Drag in the takes row, mark I / O and press N, or use Auto-detect takes.'));
+    } else {
+      const nOn = RV.takes.filter((t) => t.export).length;
+      const setAll = (on) => { RV.takes.forEach((t) => { t.export = on; }); this.commitTakes(); };
+      takes.append(h('div', { class: 'row', style: { gap: '6px' } },
+        h('button', { class: 'btn xs', disabled: nOn === RV.takes.length, onclick: () => setAll(true) }, 'Select all'),
+        h('button', { class: 'btn xs', disabled: !nOn, onclick: () => setAll(false) }, 'Deselect all'),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'note' }, `${nOn}/${RV.takes.length} to export`)));
     }
     for (const tk of RV.takes) {
       const sel = RV.sel && RV.sel.kind === 'take' && RV.sel.id === tk.id;
@@ -1820,7 +1833,18 @@ const ReviewScreen = {
     const scroll = h('div', { class: 'side-scroll' }, takes, cams, out);
     this.foot = h('div', { class: 'side-foot' });
     A.append(scroll, this.foot);
-    this.renderSideFoot();
+    this.renderSideFoot();     // before measuring: it takes height from the list
+    scroll.scrollTop = top;
+    // a take selected elsewhere (timeline, J / L) is scrolled into view
+    const selId = RV.sel && RV.sel.kind === 'take' ? RV.sel.id : null;
+    const row = selId && selId !== this.sideSel ? scroll.querySelector('.take-row.sel') : null;
+    if (row) {
+      const r = row.getBoundingClientRect();
+      const b = scroll.getBoundingClientRect();
+      if (r.top < b.top) scroll.scrollTop -= b.top - r.top + 8;
+      else if (r.bottom > b.bottom) scroll.scrollTop += r.bottom - b.bottom + 8;
+    }
+    this.sideSel = selId;
   },
   tree(camIds) {
     const lines = [{ t: `sessions/${S.name}/`, c: '#d3d3d3' }, { t: `├ source/  (${S.data.files.length} files, untouched)`, c: '#7a7a7a' }, { t: '└ output/', c: '#f1f1f1' }];
@@ -1903,6 +1927,9 @@ const ReviewScreen = {
   // ---------------------------------------------------------------- inspector (right)
   renderInspector() {
     const I = this.insp;
+    const key = RV.sel ? `${RV.sel.kind}:${RV.sel.id}` : '';
+    const top = key === this.inspKey ? I.scrollTop : 0;
+    this.inspKey = key;
     I.innerHTML = '';
     const open = prefs.get('insp', true);
     I.className = `inspector ${open ? '' : 'collapsed'}`;
@@ -1916,6 +1943,7 @@ const ReviewScreen = {
     if (sel && sel.kind === 'file' && fileById(sel.id)) this.inspFile(I, fileById(sel.id), collapse);
     else if (sel && sel.kind === 'take' && this.selectedTake()) this.inspTake(I, this.selectedTake(), collapse);
     else this.inspSession(I, collapse);
+    I.scrollTop = top;
   },
   inspSession(I, collapse) {
     const vids = videoFiles();
@@ -2019,8 +2047,11 @@ const ReviewScreen = {
           h('span', { class: 'dot sq', style: { background: c.missing ? '#E56767' : c.padded ? '#E89768' : '#97d47d' } }),
           h('b', null, c.cam?.name || '?'), h('span', { class: 'spacer' }),
           h('span', { class: 'muted' }, c.missing ? 'no footage — skipped' : c.padded ? 'padded' : 'full')),
-        c.file ? h('span', { class: 'muted ellipsis', title: c.file.rel }, basename(c.file.rel)) : null,
-        c.file && c.padded ? h('span', { class: 'warn' }, `${c.pre ? `${c.pre.toFixed(2)} s black before` : ''}${c.pre && c.post ? ' · ' : ''}${c.post ? `${c.post.toFixed(2)} s black after` : ''}`) : null))),
+        (c.files || []).map((f) => h('span', { class: 'muted ellipsis', title: f.rel }, basename(f.rel))),
+        c.padded ? h('span', { class: 'warn' }, [
+          c.pre > 0.0005 ? `${c.pre.toFixed(2)} s black before` : '',
+          c.gap > 0.0005 ? `${c.gap.toFixed(2)} s black between files` : '',
+          c.post > 0.0005 ? `${c.post.toFixed(2)} s black after` : ''].filter(Boolean).join(' · ')) : null))),
     h('div', { class: 'row', style: { gap: '6px' } },
       h('button', { class: 'btn sm', onclick: () => this.seek(tk.start) }, icon('backward-step'), 'Go to in'),
       h('button', { class: 'btn sm', onclick: () => this.seek(tk.end) }, 'Go to out', icon('forward-step')),

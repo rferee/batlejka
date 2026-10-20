@@ -1,14 +1,16 @@
 """Per-take export (§6.6).
 
 For every selected take and camera: one ``<camera>_synced.mp4`` cut from the
-camera's best-covering file, conformed to the target fps, padded with black
-(and silence) where the camera started late or stopped early, with the
-camera's user rotation baked in — the only place pixels are rotated (R1) —
-and exactly ``N = round(duration × fps)`` frames (R3).
+camera's files that overlap the take (joined end to end when it spans several),
+conformed to the target fps, padded with black (and silence) where the camera
+started late, stopped early or wasn't recording in between, with the camera's
+user rotation baked in — the only place pixels are rotated (R1) — and exactly
+``N = round(duration × fps)`` frames (R3).
 """
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,13 +28,23 @@ NVENC_PRESETS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
 
 
 @dataclass
+class Segment:
+    file: dict
+    seek: float           # input -ss (file time)
+    gap: int              # black frames before it (since the previous segment)
+    frames: int           # output frames taken from the file
+    start: float = 0.0    # where the file starts, in take time (exact; the frames are rounded)
+
+
+@dataclass
 class CamPlan:
     camera: dict
-    file: dict
+    file: dict            # the file covering most of the take
     name: str             # sanitized camera name used in the file name
-    seek: float           # input -ss (file time)
-    pre: float            # black before the file starts
-    post: float           # what the file is missing at the end
+    seek: float           # input -ss (file time) of a single-file plan
+    pre: float            # black before the footage starts
+    post: float           # black after it ends
+    segments: list = field(default_factory=list)   # every file used, in order
     out: Path = None
     frames: int | None = None
     status: str = "pending"
@@ -66,7 +78,26 @@ def _file_duration(f: dict) -> float:
     return float(v.get("duration") or f["probe"].get("duration") or 0.0)
 
 
-def plan_take(data: dict, take: dict, camera_ids: list[str]) -> tuple[list[CamPlan], list[dict]]:
+def plan_segments(take: dict, files: list[dict], fps: Fraction) -> list[Segment]:
+    """A camera's files laid end to end over the take, in output frames: each one
+    starts at its own offset, black fills the time before / between them. A file
+    overlapping the previous one starts where that one ends."""
+    F = float(fps)
+    n = frame_count(take, fps)
+    segs, pos = [], 0
+    for f in sorted(files, key=lambda f: f["offset"]):
+        s = f["offset"] - take["start"]            # file start, in take time
+        a = max(pos, round(s * F))
+        b = min(n, round((s + _file_duration(f)) * F))
+        if b - a < 1:
+            continue
+        segs.append(Segment(file=f, seek=max(0.0, a / F - s), gap=a - pos, frames=b - a, start=s))
+        pos = b
+    return segs
+
+
+def plan_take(data: dict, take: dict, camera_ids: list[str], fps: Fraction | None = None) -> tuple[list[CamPlan], list[dict]]:
+    fps = fps or target_fraction(data)
     cams = {c["id"]: c for c in data["cameras"]}
     files = [f for f in data["files"] if f.get("probe") and f["probe"].get("video") and f.get("offset") is not None]
     plans, skipped, used = [], [], set()
@@ -74,14 +105,8 @@ def plan_take(data: dict, take: dict, camera_ids: list[str]) -> tuple[list[CamPl
         cam = cams.get(cid)
         if cam is None:
             continue
-        best, best_ov = None, 0.0
-        for f in files:
-            if f.get("camera") != cid:
-                continue
-            ov = min(take["end"], f["offset"] + _file_duration(f)) - max(take["start"], f["offset"])
-            if ov > best_ov:
-                best, best_ov = f, ov
-        if best is None:
+        segs = plan_segments(take, [f for f in files if f.get("camera") == cid], fps)
+        if not segs:
             skipped.append({"camera_id": cid, "name": cam["name"], "reason": "no footage overlaps this take"})
             continue
         name = sanitize_filename(cam["name"], cid)
@@ -90,12 +115,19 @@ def plan_take(data: dict, take: dict, camera_ids: list[str]) -> tuple[list[CamPl
             name = f"{base}_{k}"
             k += 1
         used.add(name.lower())
-        in_t = take["start"] - best["offset"]
-        pre = max(0.0, -in_t)
-        seek = max(0.0, in_t)
         duration = take["end"] - take["start"]
-        post = max(0.0, duration - pre - (_file_duration(best) - seek))
-        plans.append(CamPlan(camera=cam, file=best, name=name, seek=seek, pre=pre, post=post))
+        if len(segs) == 1:
+            best = segs[0].file
+            in_t = take["start"] - best["offset"]
+            pre = max(0.0, -in_t)
+            seek = max(0.0, in_t)
+            post = max(0.0, duration - pre - (_file_duration(best) - seek))
+        else:
+            best = max(segs, key=lambda sg: sg.frames).file
+            seek = segs[0].seek
+            pre = segs[0].gap / float(fps)
+            post = (frame_count(take, fps) - sum(sg.gap + sg.frames for sg in segs)) / float(fps)
+        plans.append(CamPlan(camera=cam, file=best, name=name, seek=seek, pre=pre, post=post, segments=segs))
     return plans, skipped
 
 
@@ -159,6 +191,86 @@ def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: 
     return args
 
 
+def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fraction, n_frames: int, options: dict,
+                         hwaccel: bool) -> list:
+    """A camera that recorded the take in several files: each file gets its own
+    chain (fps, scale, rotation, then black for the break before it, counted in
+    frames) and the chains are joined with concat. Audio likewise, with silence
+    for the breaks and for files without sound."""
+    fps_s = ff.frac_str(fps)
+    F = float(fps)
+    nvenc = options.get("encoder") == "h264_nvenc"
+    margin = max(1, math.ceil(0.25 * F))     # extra frames past each file's end
+    segs = plan.segments
+    tail = n_frames - sum(sg.gap + sg.frames for sg in segs)
+    audio = [sg.file["probe"].get("audio") for sg in segs]
+    with_audio = bool(options.get("audio", True) and any(audio))
+    args: list = ["ffmpeg", "-y", "-v", "error"]
+    for sg, src in zip(segs, srcs):
+        if hwaccel:
+            args += ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        args += (["-ss", f"{sg.seek:.6f}"] if sg.seek > 0 else []) + ["-i", src]
+    # audio through inputs of their own, as in build_command, placed at the file's
+    # exact start rather than on the frame grid: [chain start, file start] is silence
+    audio_in, chain_at, pos = {}, [], 0
+    for sg in segs:
+        chain_at.append(pos / F)
+        pos += sg.gap + sg.frames
+    if with_audio:
+        for k, (sg, src) in enumerate(zip(segs, srcs)):
+            if audio[k]:
+                audio_in[k] = len(segs) + len(audio_in)
+                a_seek = max(0.0, chain_at[k] - sg.start)
+                args += (["-ss", f"{a_seek:.6f}"] if a_seek > 0 else []) + ["-vn", "-i", src]
+        first = next(a for a in audio if a)
+        rate = int(first.get("sample_rate") or 48000)
+        layout = "mono" if max(int(a.get("channels") or 2) for a in audio if a) == 1 else "stereo"
+        aformat = f"aformat=sample_fmts=fltp:sample_rates={rate}:channel_layouts={layout}"
+    graph, vs, als = [], "", ""
+    for k, sg in enumerate(segs):
+        last = k == len(segs) - 1
+        keep = sg.gap + sg.frames + (tail if last else 0)
+        vf = [f"fps={fps_s}:start_time=0"]
+        if hwaccel:
+            meta = int((sg.file["probe"].get("video") or {}).get("rotation_meta") or 0)
+            rot = (meta + int(plan.camera.get("rotation") or 0)) % 360
+            vf += [scale_filter(options.get("long_side"), cuda=True), "hwdownload", "format=nv12"]
+            vf += [ROTATE[rot]] if rot in ROTATE else []
+        else:
+            rot = int(plan.camera.get("rotation") or 0)
+            vf += ([ROTATE[rot]] if rot in ROTATE else []) + [scale_filter(options.get("long_side"))]
+        # one tpad per chain (two in a row after fps lose the end padding)
+        pad = [f"start={sg.gap}"] if sg.gap else []
+        pad += [f"stop={tail + margin}"] if last and tail > 0 else ["stop_mode=clone", f"stop={margin}"]
+        vf += ["tpad=" + ":".join(pad + ["color=black"]), f"trim=end_frame={keep}", "setpts=PTS-STARTPTS"]
+        graph.append(f"[{k}:v:0]" + ",".join(vf) + f"[v{k}]")
+        vs += f"[v{k}]"
+        if with_audio:
+            if k in audio_in:
+                delay = round(max(0.0, sg.start - chain_at[k]) * rate)
+                af = [f"[{audio_in[k]}:a:0]aresample={rate}:async=1:first_pts=0", f"adelay={delay}S:all=1"]
+            else:
+                af = [f"anullsrc=r={rate}:cl={layout}"]
+            graph.append(",".join(af + ["apad", f"atrim=duration={keep / F:.6f}", "asetpts=PTS-STARTPTS", aformat]) + f"[a{k}]")
+            als += f"[a{k}]"
+    graph.append(f"{vs}concat=n={len(segs)}:v=1:a=0" + ("[v]" if hwaccel else ",format=yuv420p[v]"))
+    if with_audio:
+        graph.append(f"{als}concat=n={len(segs)}:v=0:a=1[a]")
+    args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-frames:v", str(n_frames)]
+    crf = int(options.get("crf", 17))
+    if nvenc:
+        args += ["-c:v", "h264_nvenc", "-preset", options.get("nvenc_preset", "p5"), "-rc", "vbr",
+                 "-cq", str(crf + 2), "-b:v", "0"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+    if with_audio:
+        args += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k", "-t", f"{n_frames / F:.6f}"]
+    else:
+        args += ["-an"]
+    args += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", out]
+    return args
+
+
 def normalize_options(options: dict, defaults: dict) -> dict:
     o = dict(defaults)
     o.update({k: v for k, v in (options or {}).items() if v is not None or k == "long_side"})
@@ -200,7 +312,7 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
     work = []
     used_dirs = set()
     for tk in takes:
-        plans, skipped = plan_take(data, tk, camera_ids)
+        plans, skipped = plan_take(data, tk, camera_ids, fps)
         dname = sanitize_filename(tk["name"], tk["id"])
         base, k = dname, 2
         while dname.lower() in used_dirs:
@@ -231,6 +343,10 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             skipped_n += 1
         for plan in plans:
             plan.out = vid_dir / f"{plan.name}_synced.mp4"
+            if len(plan.segments) > 1:
+                breaks = sum(sg.gap for sg in plan.segments[1:]) / float(fps)
+                plan.notes.append(f"joined from {len(plan.segments)} files, {breaks:.3f}s black between")
+                job.log(f"{tk['name']}: {plan.name} joined from {len(plan.segments)} files ({breaks:.2f} s black between)")
             if max(plan.pre, plan.post) > 0.5 / float(fps):
                 plan.notes.append(f"padded {plan.pre:.3f}s before, {plan.post:.3f}s after")
                 job.log(f"{tk['name']}: {plan.name} padded with {plan.pre:.2f} s black before / {plan.post:.2f} s after", "warn")
@@ -268,7 +384,8 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
                 running[key][1] = x
             show()
         try:
-            ok = encode_one(tk, plan, n, paths.source_file(plan.file["rel"]), fps, options, hw, prog, job)
+            srcs = [paths.source_file(sg.file["rel"]) for sg in plan.segments]
+            ok = encode_one(tk, plan, n, srcs, fps, options, hw, prog, job)
         finally:
             with lock:
                 running.pop(key, None)
@@ -314,6 +431,9 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
                 "camera_id": p.camera["id"], "name": p.camera["name"],
                 "output": p.out.relative_to(take_dir).as_posix() if p.out else None,
                 "source": p.file["rel"], "offset": p.file["offset"], "sync": p.file.get("sync"),
+                "sources": [{"source": sg.file["rel"], "offset": sg.file["offset"], "sync": sg.file.get("sync"),
+                             "seek": round(sg.seek, 6), "gap_frames": sg.gap, "frames": sg.frames}
+                            for sg in p.segments],
                 "rotation": int(p.camera.get("rotation") or 0), "seek": round(p.seek, 6),
                 "pre_pad": round(p.pre, 6), "post_pad": round(p.post, 6),
                 "frames": p.frames, "status": p.status,
@@ -333,13 +453,17 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
             "output": str(paths.output)}
 
 
-def encode_one(tk: dict, plan: CamPlan, n: int, src: Path, fps: Fraction, options: dict, hw: bool,
+def encode_one(tk: dict, plan: CamPlan, n: int, srcs: list[Path], fps: Fraction, options: dict, hw: bool,
                prog, job: Job) -> bool:
-    """Encode one camera of one take into a temp file, then move it into place."""
+    """Encode one camera of one take into a temp file, then move it into place.
+    ``srcs``: the source path of each of the plan's segments."""
     tmp = plan.out.with_name(plan.out.stem + ".tmp.mp4")
     ok, err = False, ""
     for use_hw in ([True, False] if hw else [False]):
-        args = build_command(src, tmp, plan, fps, n, options, use_hw)
+        if len(plan.segments) > 1:
+            args = build_joined_command(srcs, tmp, plan, fps, n, options, use_hw)
+        else:
+            args = build_command(srcs[0], tmp, plan, fps, n, options, use_hw)
         t0 = time.time()
         try:
             rc, err = ff.run_progress(args, n / float(fps), prog, job.cancel_event)

@@ -6,6 +6,7 @@ import json
 import subprocess
 import threading
 import time
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ from mocap_preprocess.jobs import Job
 
 FPS = 30000 / 1001
 WIDE = {"id": "t9", "name": "wide take", "start": 3.0, "end": 19.5, "export": True}
+SPLIT = {"id": "t10", "name": "split take", "start": 12.0, "end": 30.0, "export": True}  # across every phone's break
 
 
 def luminance(path) -> np.ndarray:
@@ -29,6 +31,38 @@ def flash_starts(lum: np.ndarray) -> list[int]:
     return [int(i) for i in np.where(hot & ~np.r_[False, hot[:-1]])[0]]
 
 
+def audio_track(path, sr: int = 8000) -> np.ndarray:
+    r = subprocess.run([config.ffmpeg_path(), "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(sr),
+                        "-f", "f32le", "-"], capture_output=True, check=True)
+    return np.frombuffer(r.stdout, np.float32)
+
+
+def test_plan_lays_a_cameras_files_end_to_end():
+    """Every file of the camera that overlaps the take is used, in order, with black
+    before / between / after them counted in output frames."""
+    cam = {"id": "c1", "name": "Cam", "rotation": 0}
+
+    def clip(rel, offset, duration):
+        return {"rel": rel, "camera": "c1", "offset": offset,
+                "probe": {"video": {"duration": duration}, "audio": {"sample_rate": 48000, "channels": 2}}}
+    data = {"cameras": [cam], "files": [clip("b", 20.01, 10.0), clip("a", 4.0, 10.0), clip("c", 28.0, 10.0),
+                                         clip("late", 50.0, 5.0)]}
+    (plan,), skipped = exporter.plan_take(data, {"start": 10.0, "end": 40.0}, ["c1"], Fraction(30))
+    assert not skipped
+    got = [(s.file["rel"], s.gap, s.frames, round(s.seek, 6)) for s in plan.segments]
+    # a: 6 s into the file at the take start; b after a 6 s break (its video on the
+    # nearest frame); c overlaps b, so it starts where b ends (2 s into c); "late"
+    # starts after the take
+    assert got == [("a", 0, 120, 6.0), ("b", 180, 300, 0.0), ("c", 0, 240, 2.0)]
+    assert plan.file["rel"] == "b" and plan.pre == 0 and plan.post == pytest.approx(2.0)
+    args = [str(a) for a in exporter.build_joined_command(["a.mov", "b.mov", "c.mov"], "out.mp4", plan, Fraction(30), 900,
+                                                          exporter.normalize_options({}, config.DEFAULT_EXPORT_OPTIONS), False)]
+    graph = args[args.index("-filter_complex") + 1]
+    assert args.count("-i") == 6 and "concat=n=3:v=1:a=0" in graph and "concat=n=3:v=0:a=1" in graph
+    # b's sound starts at its exact offset, 6.01 s after its chain starts, not on the frame grid
+    assert "adelay=288480S:all=1" in graph
+
+
 @pytest.fixture(scope="module")
 def exported(synced):
     store, name, gt = synced
@@ -37,7 +71,7 @@ def exported(synced):
     by_rel = files_by_rel(data)
     fuji_cam = by_rel["DSCF0001.MOV"]["camera"]
     with store.edit(name) as d:
-        d["takes"] = takes.detect(d) + [WIDE]
+        d["takes"] = takes.detect(d) + [WIDE, SPLIT]
         for c in d["cameras"]:
             c["rotation"] = 90 if c["id"] == fuji_cam else 0
         # what the user does for the amber (metadata-placed) clip: nudge it by eye
@@ -123,6 +157,44 @@ def test_padding_when_camera_starts_late(exported):
     fuji = next(c for c in info["cameras"] if c["source"] == "DSCF0001.MOV")
     assert fuji["pre_pad"] == 0 and fuji["post_pad"] == 0
     assert all(c["frames"] == n for c in by_name.values())
+
+
+def test_take_across_a_break_joins_both_files(exported):
+    """A take spanning a recording break: each phone's two clips are joined with
+    black (and silence) in the break, not just the clip that covers the most."""
+    store, name, gt, data, _, _, fuji_cam = exported
+    d = store.paths(name).output / exporter.sanitize_filename(SPLIT["name"])
+    info = json.loads((d / "take_info.json").read_text())
+    n = round((SPLIT["end"] - SPLIT["start"]) * FPS)
+
+    def frame(t):
+        return round((t - SPLIT["start"]) * FPS)
+    for cam in info["cameras"]:
+        if cam["camera_id"] == fuji_cam:
+            assert [s["source"] for s in cam["sources"]] == ["DSCF0001.MOV"]
+            continue
+        key = gt["files"][cam["source"]]["camera"]
+        clips = [r for r in gt["cameras"][key]
+                 if gt["files"][r]["offset"] < SPLIT["end"] and gt["files"][r]["offset"] + gt["files"][r]["duration"] > SPLIT["start"]]
+        assert len(clips) == 2 and [s["source"] for s in cam["sources"]] == clips, cam
+        first, second = (gt["files"][r] for r in clips)
+        end1, start2 = frame(first["offset"] + first["duration"]), frame(second["offset"])
+        out = d / "synchronized_videos" / cam["output"].split("/")[-1]
+        lum = luminance(out)
+        assert len(lum) == n and cam["frames"] == n
+        assert lum[end1 - 30: end1 - 2].mean() > 30, cam["name"]       # end of the first clip
+        assert lum[end1 + 2: start2 - 2].max() < 20, cam["name"]       # black in the break
+        assert lum[start2 + 2: start2 + 30].mean() > 30, cam["name"]   # start of the second clip
+        # sound where the clip had some, silence in the break and for the silent clip
+        a, sr = audio_track(out), 8000
+
+        def rms(t0, t1):
+            return float(np.sqrt(np.mean(a[int((t0 - SPLIT["start"]) * sr): int((t1 - SPLIT["start"]) * sr)] ** 2)))
+        assert abs(len(a) / sr - n / FPS) < 0.05, cam["name"]
+        assert rms(first["offset"] + first["duration"] + 0.3, second["offset"] - 0.3) < 1e-4, cam["name"]
+        for c, t0, t1 in ((first, SPLIT["start"] + 0.3, first["offset"] + first["duration"] - 0.3),
+                          (second, second["offset"] + 0.3, SPLIT["end"] - 0.3)):
+            assert (rms(t0, t1) > 1e-3) == c["audio"], (cam["name"], c)
 
 
 def test_flat_layout_and_skip_without_overlap(exported):
