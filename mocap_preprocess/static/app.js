@@ -2,6 +2,8 @@
 import { applyFit, Grid } from './grid.js';
 import { Timeline } from './timeline.js';
 import { SyncViz, snapshotFromSession, replayFrames } from './syncviz.js';
+import { MocapScreen } from './mocap.js';
+import { gpuCap, loadSetup, setupCard } from './setup.js';
 
 // ------------------------------------------------------------------ helpers
 export function h(tag, props = null, ...kids) {
@@ -68,14 +70,14 @@ function fmtBytes(n) {
   const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
 }
-function fmtDate(epoch) {
+export function fmtDate(epoch) {
   if (!epoch) return '—';
   const d = new Date(epoch * 1000);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 const basename = (rel) => rel.split('/').pop();
 
-const prefs = {
+export const prefs = {
   get(k, d) {
     try {
       const v = localStorage.getItem('mocap.' + k);
@@ -88,7 +90,7 @@ const prefs = {
 };
 
 // ------------------------------------------------------------------ API
-async function api(method, url, body) {
+export async function api(method, url, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
@@ -101,6 +103,7 @@ async function api(method, url, body) {
     const d = data && data.detail;
     const err = new Error(d ? (typeof d === 'string' ? d : JSON.stringify(d)) : `${r.status} ${r.statusText}`);
     err.status = r.status;
+    err.detail = d;
     throw err;
   }
   return data;
@@ -167,12 +170,14 @@ const STEPS = [
   { id: 'sync', label: 'Sync' },
   { id: 'review', label: 'Review' },
   { id: 'export', label: 'Export' },
+  { id: 'mocap', label: 'Mocap' },
 ];
 
 function stepEnabled(id) {
   if (id === 'session') return true;
   if (!S.data) return false;
   if (id === 'process') return true;
+  if (id === 'mocap') return !!S.data.state.exported_at;
   return !!S.data.state.processed_at && videoFiles().length > 0;
 }
 
@@ -185,6 +190,7 @@ function stepDone(id) {
     case 'sync': return !!st.synced_at;
     case 'review': return (S.data?.takes || []).length > 0;
     case 'export': return !!st.exported_at;
+    case 'mocap': return Object.values(S.data?.mocap?.takes || {}).some((t) => t.status === 'done');
     default: return false;
   }
 }
@@ -197,7 +203,7 @@ function renderSteps() {
     nav.append(h('button', {
       class: `${active ? 'active' : ''} ${stepDone(s.id) && !active ? 'done' : ''}`,
       disabled: !stepEnabled(s.id),
-      title: stepEnabled(s.id) ? '' : 'Process the source files first',
+      title: stepEnabled(s.id) ? '' : s.id === 'mocap' ? 'Export a take first' : 'Process the source files first',
       onclick: () => go(s.id),
     }, s.label, stepDone(s.id) ? icon('check') : null));
   }
@@ -225,7 +231,7 @@ function renderJobPill() {
     }, icon('xmark')) : null));
 }
 
-async function cancelJob(id) {
+export async function cancelJob(id) {
   try { await POST(`/api/jobs/${id}/cancel`); } catch (e) { toast(e.message, 'error'); }
   pollSoon();
 }
@@ -418,34 +424,43 @@ export function pollSoon() {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(pollJobs, 150);
 }
+const jobListeners = [];
+/** Call ``fn(jobs, finished)`` after every poll (finished = jobs that just stopped running). */
+export function onJobs(fn) { jobListeners.push(fn); }
+
 async function pollJobs() {
   clearTimeout(pollTimer);
   let next = 2500;
-  if (S.name) {
-    try {
-      const list = await GET(`/api/jobs?session=${enc(S.name)}`);
-      const prev = new Map(S.jobs.map((j) => [j.id, j]));
-      let refresh = false;
-      for (const j of list) {
-        const p = prev.get(j.id);
-        if (p && isActive(p) && !isActive(j)) {
-          refresh = true;
-          if (j.status === 'error') toast(`${j.label} failed: ${j.error}`, 'error');
-          else if (j.status === 'done' && !['proxies', 'scan', 'resync'].includes(j.kind)) toast(`${j.label} done`, 'ok');
-        }
-        if (j.kind === 'proxies' && isActive(j) && p && p.log_seq !== j.log_seq && Date.now() - lastProxyRefresh > 2000) {
-          lastProxyRefresh = Date.now();
-          refresh = true;
-        }
+  try {
+    const name = S.name;
+    const list = await GET(name ? `/api/jobs?session=${enc(name)}` : '/api/jobs?global_only=1');
+    if (name !== S.name) { pollTimer = setTimeout(pollJobs, 150); return; }
+    const finished = [];
+    const prev = new Map(S.jobs.map((j) => [j.id, j]));
+    let refresh = false;
+    for (const j of list) {
+      const p = prev.get(j.id);
+      if (p && isActive(p) && !isActive(j)) {
+        refresh = true;
+        finished.push(j);
+        if (j.status === 'error') toast(`${j.label} failed: ${j.error}`, 'error');
+        else if (j.status === 'done' && !['proxies', 'scan', 'resync'].includes(j.kind)) toast(`${j.label} done`, 'ok');
       }
-      S.jobs = list;
-      if (list.some(isActive)) next = 600;
-      renderJobPill();
-      if (S.logOpen) renderJobLog();
-      if (mounted && mounted.onJobs) mounted.onJobs();
-      if (refresh) await refreshSession();
-    } catch { next = 4000; }
-  }
+      if (j.kind === 'proxies' && isActive(j) && p && p.log_seq !== j.log_seq && Date.now() - lastProxyRefresh > 2000) {
+        lastProxyRefresh = Date.now();
+        refresh = true;
+      }
+    }
+    S.jobs = list;
+    if (list.some(isActive)) next = 600;
+    renderJobPill();
+    if (S.logOpen) renderJobLog();
+    if (mounted && mounted.onJobs) mounted.onJobs();
+    for (const fn of jobListeners) {
+      try { fn(list, finished); } catch (e) { console.error(e); }
+    }
+    if (refresh) await refreshSession();
+  } catch { next = 4000; }
   pollTimer = setTimeout(pollJobs, next);
 }
 
@@ -461,7 +476,7 @@ const SessionScreen = {
     const r = this.root;
     const keepNew = r.querySelector('.new-session input')?.value || '';
     r.innerHTML = '';
-    r.append(h('div', { class: 'page-head' },
+    r.append(setupCard(), h('div', { class: 'page-head' },
       h('h1', null, 'Sessions'),
       h('p', null, 'Drop footage into ', h('span', { class: 'accent' }, 'sessions/<name>/source/'),
         ', refresh, pick it here. That\'s the whole onboarding.')));
@@ -593,9 +608,15 @@ const ProcessScreen = {
         h('select', { class: 'input', onchange: (e) => putSettings({ proxy_long_side: Number(e.target.value) }) },
           PROXY_SIZES.map((r) => h('option', { value: r, selected: r === st.proxy_long_side }, `${r} px long side`))),
         h('span', { class: 'note' }, 'low-res H.264, 15-frame GOP — preview only; a new size rebuilds proxies on the next Process')),
-      h('div', { class: 'toggle', onclick: () => putSettings({ hwaccel: !st.hwaccel }) },
-        h('span', { class: `check ${st.hwaccel ? 'on' : ''}` }, icon('check')),
-        'GPU decode (-hwaccel cuda) for proxies and export'),
+      (() => {
+        const dec = gpuCap('decode');
+        const off = dec && !dec.ok;    // the Setup panel's test failed: it would only fall back to the CPU
+        return h('div', {
+          class: `toggle ${off ? 'disabled' : ''}`, title: off ? `GPU decode is unavailable: ${dec.error}` : '',
+          onclick: () => { if (!off || st.hwaccel) putSettings({ hwaccel: !st.hwaccel }); },
+        }, h('span', { class: `check ${st.hwaccel ? 'on' : ''}` }, icon('check')),
+        'GPU decode (-hwaccel cuda) for proxies and export', off ? h('span', { class: 'note' }, '(unavailable on this machine)') : null);
+      })(),
       h('button', { class: 'adv-toggle', onclick: () => { this.advOpen = !this.advOpen; this.renderLeft(); } },
         icon(this.advOpen ? 'chevron-down' : 'chevron-right'), 'Advanced sync thresholds'),
       this.advOpen ? h('div', { class: 'col' },
@@ -2110,16 +2131,22 @@ const ExportScreen = {
     const o = RV.opts;
     const fps = targetFps();
     const nv = o.encoder === 'h264_nvenc';
-    const seg = (key, values, label = (v) => String(v)) => h('div', { class: 'seg' },
-      values.map((v) => h('button', { class: o[key] === v ? 'on' : '', onclick: () => { o[key] = v; this.optsChanged(); } }, label(v))));
+    const seg = (key, values, label = (v) => String(v), why = () => null) => h('div', { class: 'seg' },
+      values.map((v) => h('button', {
+        class: o[key] === v ? 'on' : '', disabled: !!why(v), title: why(v) || '',
+        onclick: () => { o[key] = v; this.optsChanged(); },
+      }, label(v))));
     const toggle = (key, label) => h('div', { class: 'toggle', onclick: () => { o[key] = !o[key]; this.optsChanged(); } },
       h('span', { class: `check ${o[key] ? 'on' : ''}` }, icon('check')), label);
+    const nvenc = gpuCap('nvenc');
+    const noNvenc = nvenc && !nvenc.ok ? `NVENC is unavailable on this machine: ${nvenc.error}` : null;
     this.treeBox = this.tree(camIds);
     return h('div', { class: 'export-side' },
       h('div', { class: 'card' },
         h('span', { class: 'card-title' }, 'Output'),
         h('div', { class: 'col', style: { gap: '10px' } },
-          h('div', { class: 'kv' }, 'Encoder', seg('encoder', ['libx264', 'h264_nvenc'])),
+          h('div', { class: 'kv' }, 'Encoder', seg('encoder', ['libx264', 'h264_nvenc'], undefined, (v) => (v === 'h264_nvenc' ? noNvenc : null))),
+          nv && noNvenc ? h('span', { class: 'note warn' }, 'NVENC failed its test in Setup — this export would fail; pick libx264.') : null,
           nv ? h('div', { class: 'kv' }, 'Preset', seg('nvenc_preset', ['p5', 'p4', 'p3'], (v) => ({ p5: 'p5 quality', p4: 'p4', p3: 'p3 fast' })[v])) : null,
           h('label', { class: 'kv' }, nv ? 'CQ (−2)' : 'CRF',
             h('input', { class: 'input sm', type: 'number', min: '0', max: '51', value: o.crf, onchange: (e) => { o.crf = Math.max(0, Math.min(51, Number(e.target.value) || 17)); this.optsChanged(); } })),
@@ -2190,6 +2217,7 @@ const ExportScreen = {
   },
 };
 screens.export = ExportScreen;
+screens.mocap = MocapScreen;
 
 // ------------------------------------------------------------------ placeholder screens (filled in later milestones)
 for (const id of ['cameras', 'sync', 'review']) {
@@ -2202,6 +2230,7 @@ for (const id of ['cameras', 'sync', 'review']) {
 
 // ------------------------------------------------------------------ boot
 async function boot() {
+  loadSetup();     // not awaited: the Setup card fills in when it's ready
   try { S.health = await GET('/api/health'); } catch { S.health = null; }
   const fromHash = parseHash();
   if (fromHash) {

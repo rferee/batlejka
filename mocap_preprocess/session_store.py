@@ -115,6 +115,20 @@ class SessionPaths:
         return files
 
 
+def default_mocap() -> dict:
+    return {"calibration": None, "options": {"processes": None, "blender": False, "blender_exe": None}, "takes": {}}
+
+
+def default_export_options() -> dict:
+    opts = copy.deepcopy(config.DEFAULT_EXPORT_OPTIONS)
+    try:
+        from .setup_check import preferred_encoder   # h264_nvenc when its GPU test passed
+        opts["encoder"] = preferred_encoder()
+    except Exception:  # noqa: BLE001 - never let a probe cache problem break loading a session
+        pass
+    return opts
+
+
 def default_session(name: str) -> dict:
     return {
         "version": SESSION_VERSION,
@@ -124,7 +138,8 @@ def default_session(name: str) -> dict:
         "cameras": [],
         "takes": [],
         "sync": {},
-        "export_options": copy.deepcopy(config.DEFAULT_EXPORT_OPTIONS),
+        "export_options": default_export_options(),
+        "mocap": default_mocap(),
         "state": {"scanned_at": None, "processed_at": None, "synced_at": None, "exported_at": None},
     }
 
@@ -138,6 +153,10 @@ def _normalize(data: dict, name: str) -> dict:
         merged = copy.deepcopy(base[key])
         merged.update(data.get(key) or {})
         data[key] = merged
+    mocap = data["mocap"]
+    mocap.setdefault("calibration", None)
+    mocap["options"] = {**default_mocap()["options"], **(mocap.get("options") or {})}
+    mocap.setdefault("takes", {})
     data["name"] = name
     for f in data["files"]:
         f.setdefault("assets", {})

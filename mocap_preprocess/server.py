@@ -16,13 +16,13 @@ from . import config
 from . import ffmpeg_tools as ff
 from . import exporter, grouping, pipeline, syncing
 from . import takes as takes_mod
-from .jobs import JobConflict, JobManager
-from .session_store import (InvalidName, SessionNotFound, SessionStore, validate_fid,
-                            validate_session_name)
+from .app_state import jobs, require_session, store
+from .jobs import JobConflict
+from .routes_mocap import router as mocap_router
+from .routes_setup import router as setup_router
+from .session_store import InvalidName, SessionNotFound, validate_fid, validate_session_name
 
 app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
-store = SessionStore()
-jobs = JobManager()
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +58,7 @@ async def _no_cache_ui(request: Request, call_next):
 
 
 def _session(s: str) -> str:
-    name = validate_session_name(s)
-    if not store.exists(name):
-        raise SessionNotFound(name)
-    return name
+    return require_session(s)
 
 
 def _require_tools() -> None:
@@ -339,6 +336,14 @@ def reveal(s: str, payload: dict = Body(default={})):
     target = {"session": paths.root, "output": paths.output, "source": paths.source}.get(what)
     if target is None:
         raise HTTPException(400, f"unknown target: {what}")
+    sub = (payload or {}).get("sub")     # one folder inside output/, e.g. a take
+    if sub:
+        if what != "output":
+            raise HTTPException(400, "sub is only allowed with what=output")
+        cand = (paths.output / str(sub)).resolve()
+        if cand.parent != paths.output.resolve() or not cand.is_dir():
+            raise HTTPException(404, f"no such folder in output/: {sub!r}")
+        target = cand
     target.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         os.startfile(str(target))  # noqa: S606 - local tool, path is ours
@@ -352,10 +357,15 @@ def reveal(s: str, payload: dict = Body(default={})):
 # jobs
 
 @app.get("/api/jobs")
-def list_jobs(session: str | None = None):
+def list_jobs(session: str | None = None, global_only: bool = False):
+    """A session's jobs plus the global ones (session None, e.g. FreeMoCap setup);
+    ``global_only`` for when no session is open; neither = every job."""
+    if global_only:
+        return [j.info() for j in jobs.list() if j.session is None]
     if session is not None:
         session = validate_session_name(session)
-    return [j.info() for j in jobs.list(session)]
+        return [j.info() for j in jobs.list() if j.session in (session, None)]
+    return [j.info() for j in jobs.list()]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -451,4 +461,6 @@ def index():
     return FileResponse(config.STATIC_DIR / "index.html", media_type="text/html")
 
 
+app.include_router(setup_router)
+app.include_router(mocap_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")

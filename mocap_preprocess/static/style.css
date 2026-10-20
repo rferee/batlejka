@@ -419,3 +419,60 @@ table.xtable tr.off td:not(.ck), table.xtable .off { opacity: .35; }
 .timeline canvas { position: absolute; left: 0; top: 0; display: block; }
 .timeline .rename { position: absolute; z-index: 5; font-size: 11px; font-weight: 700; padding: 2px 6px; background: var(--rf-bg-light); border: 1px solid var(--accent); color: var(--fg-1); outline: none; }
 .tl-hint { position: absolute; right: 12px; bottom: 3px; font-size: 10px; color: var(--fg-2); opacity: .45; pointer-events: none; }
+
+/* ---------------------------------------------------------------- setup (Session screen) */
+.setup-card { padding: 14px 20px; gap: 10px; border-left: 2px solid var(--hairline); }
+.setup-card:has(.setup-head .st-warn), .setup-card:has(.setup-head .st-error) { border-left-color: var(--accent); }
+.setup-card.collapsed { padding-top: 10px; padding-bottom: 10px; }
+.setup-head { display: flex; align-items: center; gap: 12px; min-width: 0; cursor: pointer; user-select: none; }
+.setup-head .title { font-weight: 700; font-size: 15px; }
+.setup-head .sum { font-size: 12px; color: var(--fg-2); min-width: 0; }
+.setup-rows { display: flex; flex-direction: column; }
+.setup-row {
+  display: grid; grid-template-columns: 18px 150px minmax(0, 1fr) auto; gap: 12px; align-items: start;
+  padding: 10px 0; border-top: 1px solid var(--hairline-soft); font-size: 12px;
+}
+.setup-row .lbl { color: var(--fg-1); font-weight: 700; padding-top: 1px; }
+.setup-row .detail { color: var(--fg-2); overflow-wrap: anywhere; line-height: 1.45; }
+.setup-row .hint { font-size: 11px; color: var(--fg-2); opacity: .6; overflow-wrap: anywhere; line-height: 1.45; }
+.setup-row .acts { display: flex; gap: 6px; }
+.setup-row .progress { max-width: 420px; }
+.st { width: 18px; display: inline-flex; justify-content: center; font-size: 13px; padding-top: 1px; }
+.st-ok { color: var(--elven-green); }
+.st-warn { color: var(--accent); }
+.st-error { color: var(--dragonblood-red); }
+.st-neutral { color: var(--rf-midgray); }
+.st-busy { color: var(--atlantis-blue); }
+.seg button:disabled { opacity: .35; cursor: not-allowed; }
+.seg button:disabled:hover { background: var(--surface-1); }
+.toggle.disabled { opacity: .5; cursor: not-allowed; }
+.toggle.disabled:hover { color: var(--fg-2); }
+@media (max-width: 760px) { .setup-row { grid-template-columns: 18px minmax(0, 1fr); } .setup-row > .col, .setup-row > .acts { grid-column: 2; } }
+
+/* ---------------------------------------------------------------- mocap */
+.mocap-split { display: grid; grid-template-columns: minmax(300px, 400px) minmax(0, 1fr); gap: 32px; align-items: start; }
+.mocap-split .tablewrap { max-height: calc(100vh - 420px); min-height: 160px; }
+@media (max-width: 1200px) { .mocap-split { grid-template-columns: minmax(0, 1fr); } }
+.mocap-setup { max-width: 720px; border-top: 2px solid var(--accent); }
+.mocap-result { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--hairline); }
+.mocap-result .reproj { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+.mocap-cams { display: flex; flex-wrap: wrap; gap: 4px; }
+.mocap-hint { display: flex; gap: 8px; align-items: flex-start; font-size: 11px; line-height: 1.5; }
+.mocap-hint i { margin-top: 2px; }
+.mocap-action { gap: 16px; flex-wrap: nowrap; }
+.mocap-action > .note, .mocap-action > .small { min-width: 0; }
+.mocap-progress { flex: 1; max-width: 520px; gap: 6px; min-width: 0; }
+.mocap-opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--fg-2); }
+.mocap-status { display: flex; flex-direction: column; gap: 4px; min-width: 140px; max-width: 230px; }
+.mocap-st { display: inline-flex; align-items: center; gap: 6px; }
+.mocap-status .err-note { color: var(--dragonblood-red); opacity: .85; max-width: 220px; }
+.mini-bar { height: 3px; width: 150px; background: var(--surface-2); }
+.mini-bar > div { height: 100%; background: var(--accent); transition: width .3s linear; }
+table.mtable tbody tr.can { cursor: pointer; }
+table.mtable tr.off td:not(.ck) { opacity: .45; }
+table.mtable td.ck { width: 1%; }
+table.mtable .num { text-align: right; }
+.check.dis { opacity: .3; cursor: not-allowed; }
+table.mtable td.cams { white-space: normal; min-width: 150px; max-width: 300px; line-height: 1.5; }
+table.mtable td.nm { max-width: 190px; }
+@media (min-width: 1201px) and (max-width: 1500px) { .mocap-split { grid-template-columns: minmax(280px, 330px) minmax(0, 1fr); gap: 24px; } }

@@ -7,8 +7,23 @@ import subprocess
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+REPO_DIR = PACKAGE_DIR.parent
 STATIC_DIR = PACKAGE_DIR / "static"
 DEFAULT_SESSIONS_DIR = Path.cwd() / "sessions"
+
+# FreeMoCap integration: a pinned release in its own venv under .tools/ (see fmc/).
+FMC_VERSION = "v1.8.2"
+FMC_COMMIT = "a1cd374ac7c186d78d0552b8f69bf59be2f4bdcc"
+FMC_PACKAGE_DIR = PACKAGE_DIR / "fmc"          # lock files + fmc_headless.py (runs in the FreeMoCap venv)
+
+
+def tools_dir() -> Path:
+    """Per-machine tools (uv's Python, the FreeMoCap env, GPU probe cache); MOCAP_TOOLS_DIR overrides."""
+    return Path(os.environ.get("MOCAP_TOOLS_DIR") or REPO_DIR / ".tools").resolve()
+
+
+def fmc_dir() -> Path:
+    return tools_dir() / f"freemocap-{FMC_VERSION}"
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mts", ".m2ts", ".mxf"}
 
