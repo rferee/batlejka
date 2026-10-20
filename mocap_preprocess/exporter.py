@@ -109,9 +109,15 @@ def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: 
         # decode, fps and scale/8-bit stay on the GPU; frames only come down to system
         # memory for what this build can't do there (rotation, black padding) or for libx264
         args += ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    if plan.seek > 0:
-        args += ["-ss", f"{plan.seek:.6f}"]
-    args += ["-i", src, "-map", "0:v:0"]
+    seek = ["-ss", f"{plan.seek:.6f}"] if plan.seek > 0 else []
+    args += seek + ["-i", src]
+    with_audio = bool(options.get("audio", True) and plan.file["probe"].get("audio"))
+    if with_audio:
+        # the audio comes from a second, independent read of the same file: with one
+        # demuxer feeding both, a long black lead-in (adelay + tpad of tens of seconds)
+        # can deadlock ffmpeg's scheduler before the first video frame (seen with 8.0)
+        args += seek + ["-vn", "-i", src]
+    args += ["-map", "0:v:0"]
     if hwaccel:
         meta = int((plan.file["probe"].get("video") or {}).get("rotation_meta") or 0)
         rot = (meta + int(plan.camera.get("rotation") or 0)) % 360
@@ -143,9 +149,9 @@ def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: 
                  "-cq", str(crf + 2), "-b:v", "0"]
     else:
         args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
-    if options.get("audio", True) and plan.file["probe"].get("audio"):
+    if with_audio:
         delay = int(round(plan.pre * 1000))
-        args += ["-map", "0:a:0", "-af", f"adelay={delay}:all=1,apad", "-c:a", "aac", "-b:a", "160k",
+        args += ["-map", "1:a:0", "-af", f"adelay={delay}:all=1,apad", "-c:a", "aac", "-b:a", "160k",
                  "-t", f"{n_frames / float(fps):.6f}"]
     else:
         args += ["-an"]

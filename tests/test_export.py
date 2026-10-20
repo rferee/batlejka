@@ -201,3 +201,16 @@ def test_gpu_pipeline_gives_the_same_takes(exported):
     finally:
         with store.edit(name) as d:
             d["settings"]["hwaccel"] = False
+
+
+def test_audio_is_read_through_its_own_input(exported):
+    """One demuxer feeding both video and a long-delayed audio branch can deadlock
+    ffmpeg (seen with a 53 s black lead-in); the audio gets a second input."""
+    store, name, _, data, _, _, _ = exported
+    plans, _ = exporter.plan_take(data, WIDE, [c["id"] for c in data["cameras"]])
+    plan = next(p for p in plans if p.pre > 0 and p.file["probe"].get("audio"))
+    opts = exporter.normalize_options({}, config.DEFAULT_EXPORT_OPTIONS)
+    for hw in (False, True):
+        args = [str(a) for a in exporter.build_command("src.mov", "out.mp4", plan, exporter.target_fraction(data), 100, opts, hw)]
+        assert args.count("-i") == 2 and args[args.index("-i", args.index("-i") + 1) - 1] == "-vn"
+        assert "1:a:0" in args and "0:a:0" not in args
