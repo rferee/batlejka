@@ -131,6 +131,16 @@ def plan_take(data: dict, take: dict, camera_ids: list[str], fps: Fraction | Non
     return plans, skipped
 
 
+def gpu_input(f: dict) -> list:
+    """Input options of the GPU path. It rotates by hand from the probed metadata,
+    so the file's display matrix is cleared as well: with -noautorotate ffmpeg
+    copies it to the output and players would rotate the video a second time."""
+    args = ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    if int((f["probe"].get("video") or {}).get("rotation_meta") or 0):
+        args += ["-display_rotation", "0"]
+    return args
+
+
 def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: int, options: dict,
                   hwaccel: bool) -> list:
     fps_s = ff.frac_str(fps)
@@ -140,7 +150,7 @@ def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: 
     if hwaccel:
         # decode, fps and scale/8-bit stay on the GPU; frames only come down to system
         # memory for what this build can't do there (rotation, black padding) or for libx264
-        args += ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        args += gpu_input(plan.file)
     seek = ["-ss", f"{plan.seek:.6f}"] if plan.seek > 0 else []
     args += seek + ["-i", src]
     with_audio = bool(options.get("audio", True) and plan.file["probe"].get("audio"))
@@ -208,7 +218,7 @@ def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fracti
     args: list = ["ffmpeg", "-y", "-v", "error"]
     for sg, src in zip(segs, srcs):
         if hwaccel:
-            args += ["-noautorotate", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            args += gpu_input(sg.file)
         args += (["-ss", f"{sg.seek:.6f}"] if sg.seek > 0 else []) + ["-i", src]
     # audio through inputs of their own, as in build_command, placed at the file's
     # exact start rather than on the frame grid: [chain start, file start] is silence

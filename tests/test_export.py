@@ -26,6 +26,14 @@ def luminance(path) -> np.ndarray:
     return np.frombuffer(r.stdout, np.uint8).reshape(-1, 256).mean(axis=1)
 
 
+def display_rotation(path) -> float:
+    """Rotation a player applies on top of the stored pixels (display matrix)."""
+    r = subprocess.run([config.ffprobe_path(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream_side_data=rotation", "-of", "json", str(path)], capture_output=True, check=True)
+    sd = (json.loads(r.stdout).get("streams") or [{}])[0].get("side_data_list") or []
+    return float(next((d["rotation"] for d in sd if "rotation" in d), 0))
+
+
 def flash_starts(lum: np.ndarray) -> list[int]:
     hot = lum > 200
     return [int(i) for i in np.where(hot & ~np.r_[False, hot[:-1]])[0]]
@@ -122,6 +130,9 @@ def test_rotation_applied(exported):
         other = next(c for c in cams if c != fuji_cam)
         phone = ff.video_stream_info(d / "synchronized_videos" / f"{cams[other]}_synced.mp4")
         assert (phone["width"], phone["height"]) == (360, 640)  # untouched portrait
+        # rotation is baked into the pixels: no display matrix left for players to apply again
+        for v in (d / "synchronized_videos").glob("*_synced.mp4"):
+            assert display_rotation(v) == 0, v
 
 
 def test_flashes_line_up_across_cameras(exported):
@@ -260,6 +271,7 @@ def test_gpu_pipeline_gives_the_same_takes(exported):
                 assert ff.count_video_frames(v) == n, v
                 info = ff.video_stream_info(v)
                 assert (info["width"], info["height"]) == (360, 640), v   # rotation, incl. the Fuji's metadata
+                assert display_rotation(v) == 0, v                         # ...and not applied twice by players
             if tk["id"] != WIDE["id"]:
                 expected = [round((t - tk["start"]) * FPS) for t in gt["flashes"] if tk["start"] <= t < tk["end"]]
                 for c in cams.values():
