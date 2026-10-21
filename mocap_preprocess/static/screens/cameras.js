@@ -2,7 +2,7 @@
 import { applyFit } from '../grid.js';
 import {
   PUT, S, activeJob, basename, confirmModal, fmtClock, fmtDur, fpsLabel,
-  h, icon, mediaUrl, nextFree, onJobs, render, sUrl,
+  h, icon, mediaUrl, nextFree, render, sUrl,
   startJob, tip, toast, videoFiles,
 } from '../app.js';
 
@@ -300,7 +300,7 @@ export const CamerasScreen = {
     const setRot = (deg) => {
       c.rotation = ((deg % 360) + 360) % 360;
       if (img) img.classList.add('turn');   // animate the user's turns, not the first layout
-      this.refit(); // CSS transform only — nothing is re-encoded (R1)
+      this.refit(); // CSS transform only: nothing is re-encoded until export
       rotChip.textContent = `${c.rotation}°`;
       angleBtns.forEach((b, i) => b.classList.toggle('on', angles[i] === c.rotation));
       this.schedule();

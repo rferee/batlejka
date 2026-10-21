@@ -1,9 +1,9 @@
 // Sync screen.
 import { SyncViz, snapshotFromSession, replayFrames } from '../syncviz.js';
 import {
-  GET, METHOD_COLORS, S, activeJob, api, basename, cameraById, cancelJob,
-  fmtOffset, h, icon, isActive, jobLogs, lastJob, onJobs,
-  pad2, pollSoon, render, startJob, tip, videoFiles,
+  GET, METHOD_COLORS, S, activeJob, basename, cameraById, cancelJob,
+  fmtOffset, h, icon, isActive, jobLogs, lastJob,
+  pad2, pollSoon, startJob, tip, videoFiles,
   METHOD_LABEL,
 } from '../app.js';
 

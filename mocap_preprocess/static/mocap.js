@@ -5,7 +5,7 @@ import {
   h, icon, tip, S, GET, POST, PUT, sUrl, toast, confirmModal, activeJob, lastJob, cancelJob,
   go, fmtDate, fmtDur, fmtBytes, prefs, putUi, render, pollSoon,
 } from './app.js';
-import * as setup from './setup.js';
+import { showSetup } from './setup.js';
 
 export const COLORS = { green: '#97d47d', orange: '#E89768', red: '#E56767', blue: '#8880F0', grey: '#4f4f4f' };
 const STAGES = {
@@ -102,11 +102,6 @@ export function profileStatus(p, job) {
   return { text: 'not run', color: COLORS.blue };
 }
 
-export function openSetup() {
-  if (typeof setup.showSetup === 'function') setup.showSetup();
-  else go('session');
-}
-
 export function notReadyCard(fm) {
   const broken = fm.state === 'broken';
   return h('div', { class: 'card mc-setup' },
@@ -118,7 +113,7 @@ export function notReadyCard(fm) {
         ? `It's installed but its check fails${fm.detail ? `: ${fm.detail}` : ''}. Repair it from the Setup panel.`
         : 'FreeMoCap runs in its own environment (Python 3.12, ~3 GB download), separate from this app. '
           + 'Install it from the Setup panel on the Home screen, then come back here.'),
-    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: openSetup }, icon('screwdriver-wrench'), 'Open Setup')));
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => showSetup() }, icon('screwdriver-wrench'), 'Open Setup')));
 }
 
 /** POST a mocap job; when the server refuses because of leftover videos (409), list them,

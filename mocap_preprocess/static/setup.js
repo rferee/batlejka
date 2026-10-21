@@ -2,7 +2,7 @@
 // NVENC, git, uv, FreeMoCap + its self-test), expanded unless the user folds it.
 // Also the source of the GPU test results other screens use to disable
 // options (gpuCap).
-import { h, icon, GET, POST, S, toast, confirmModal, onJobs, go, pollSoon, render } from './app.js';
+import { h, icon, GET, POST, S, toast, confirmModal, isActive, onJobs, go, pollSoon, render } from './app.js';
 
 const SU = { data: null, loading: false, refreshing: false, open: null, el: null, hooked: false, error: null };
 
@@ -19,7 +19,6 @@ function shownHint(row) {
   if (!row.hint || !MANAGED.has(row.id)) return row.hint;
   return row.hint.split(' · ').filter((part) => !isPath(part)).join(' · ') || null;
 }
-const isActive = (j) => j && (j.status === 'queued' || j.status === 'running');
 const setupJob = () => S.jobs.find((j) => j.kind === 'setup' && isActive(j));
 
 /** The cached GPU test result for 'decode' or 'nvenc': {ok, error}, or null while unknown. */

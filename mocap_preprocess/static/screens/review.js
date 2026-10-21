@@ -6,7 +6,7 @@ import {
   GET, METHOD_COLORS, POST, PUT, S, activeJob, api, basename,
   cameraById, confirmModal, fileById, fmtClock, fmtDate, fmtDur, fmtOffset, fmtTC,
   fpsFloat, fpsLabel, h, icon, isMounted, mediaUrl, nextFree,
-  onJobs, pad2, pollSoon, prefs, putUi, refreshSession, render, reveal, sUrl,
+  pad2, pollSoon, prefs, putUi, refreshSession, sUrl,
   targetFps, tip, toast, videoFiles,
   METHOD_LABEL,
 } from '../app.js';
@@ -14,9 +14,9 @@ import { METHOD_TIP } from './sync.js';
 
 // ------------------------------------------------------------------ Review & export screen
 const SPEEDS = [0.25, 0.5, 1, 2];
-export const clone = (x) => JSON.parse(JSON.stringify(x));
+const clone = (x) => JSON.parse(JSON.stringify(x));
 
-export function sessionSpan() {
+function sessionSpan() {
   let end = 0;
   for (const f of videoFiles()) if (f.offset != null) end = Math.max(end, f.offset + (f.probe.duration || 0));
   return end || 60;
@@ -45,7 +45,7 @@ export function takeCoverage(tk, camIds) {
   });
 }
 
-export function coverageText(cov) {
+function coverageText(cov) {
   const missing = cov.filter((c) => c.missing).map((c) => c.cam?.name || '?');
   const padded = cov.filter((c) => !c.missing && c.padded).map((c) => `${c.cam?.name} +${(c.pre + c.gap + c.post).toFixed(1)}s pad`);
   const ok = cov.length - missing.length;

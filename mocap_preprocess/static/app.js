@@ -528,15 +528,6 @@ document.addEventListener('focusout', hideTip);
 document.addEventListener('scroll', hideTip, true);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tipFor) hideTip(); });
 
-// ------------------------------------------------------------------ placeholder screens (filled in later milestones)
-for (const id of ['cameras', 'sync', 'review']) {
-  if (!screens[id]) {
-    screens[id] = {
-      mount(root) { root.append(h('main', { class: 'page' }, h('div', { class: 'empty' }, 'Coming up.'))); },
-    };
-  }
-}
-
 // ------------------------------------------------------------------ boot
 async function boot() {
   try { S.health = await GET('/api/health'); } catch { S.health = null; }
