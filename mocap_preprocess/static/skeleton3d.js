@@ -7,9 +7,16 @@ const GRID_STEP = 500;                 // mm
 const FACE = 11;                       // landmarks 0–10 are the face: hidden in first person
 const SMOOTH = 3;                      // first-person head pose: average of ±3 frames
 const C = {
-  bg: '#0d1014', grid: 'rgba(255,255,255,0.08)', bone: '#d3d3d3', joint: '#f1f1f1',
+  bg: '#12161c', grid: 'rgba(255,255,255,0.08)', bone: '#d3d3d3',   // bg = the card it sits in (--rf-bg-light)
   x: '#E56767', y: '#97d47d', z: '#8880F0', muted: 'rgba(255,255,255,0.6)',
 };
+// one colour per body part: the left side cool (green arm, sky hand, blue leg), the right warm
+// (orange arm, amber hand, red leg), the torso and face neutral
+const PART = {
+  face: '#9a9a9a', torso: '#f1f1f1', arm_l: '#97d47d', arm_r: '#E89768', hand_l: '#7fd8ff', hand_r: '#E2B35B',
+  leg_l: '#8880F0', leg_r: '#E56767',
+};
+const HANDS = new Set(['hand_l', 'hand_r']);
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -176,7 +183,8 @@ export class SkeletonView {
     this.range.style.setProperty('--p', `${sk.n > 1 ? (this.frame / (sk.n - 1)) * 100 : 0}%`);
     this.timeEl.textContent = `${fmtT(this.frame / sk.fps)} / ${fmtT((sk.n - 1) / sk.fps)}`;
     const fpsTxt = Math.abs(sk.fps - Math.round(sk.fps)) < 0.01 ? String(Math.round(sk.fps)) : sk.fps.toFixed(2);
-    this.capEl.textContent = `frame ${this.frame + 1} / ${sk.n} · ${fpsTxt} fps · ${sk.L} body points`;
+    const hands = sk.hands ? ` + ${sk.hands} hand${sk.hands === 1 ? '' : 's'}` : '';
+    this.capEl.textContent = `frame ${this.frame + 1} / ${sk.n} · ${fpsTxt} fps · ${sk.body} body points${hands}`;
   }
 
   setMessage(text, err = false) {
@@ -352,40 +360,45 @@ export class SkeletonView {
     }
     ctx.stroke();
 
-    // skeleton
+    // skeleton: bones and joints coloured by body part, fingers thinner and smaller
     if (this.sk) {
       const P = this.sk.point;
       const f = this.frame;
       const skipFace = this.mode === 'first';
-      ctx.strokeStyle = C.bone;
-      ctx.lineWidth = 2;
       ctx.lineCap = 'square';
       ctx.lineJoin = 'miter';
-      ctx.beginPath();
-      for (const [a, b] of this.sk.connections) {
-        if (skipFace && (a < FACE || b < FACE)) continue;
-        const pa = P(f, a);
-        const pb = P(f, b);
-        if (!pa || !pb) continue;
-        const s = segment(pa, pb);
-        if (s) { ctx.moveTo(s[0][0], s[0][1]); ctx.lineTo(s[1][0], s[1][1]); }
+      for (const [part, bones] of this.sk.bones) {
+        if (skipFace && part === 'face') continue;
+        ctx.strokeStyle = PART[part] || C.bone;
+        ctx.lineWidth = HANDS.has(part) ? 1.5 : 2;
+        ctx.beginPath();
+        for (const [a, b] of bones) {
+          const pa = P(f, a);
+          const pb = P(f, b);
+          if (!pa || !pb) continue;
+          const s = segment(pa, pb);
+          if (s) { ctx.moveTo(s[0][0], s[0][1]); ctx.lineTo(s[1][0], s[1][1]); }
+        }
+        if (part === 'torso' && !skipFace) {        // MediaPipe has no neck bone: shoulders' midpoint → mouth (or nose)
+          const ls = P(f, 11), rs = P(f, 12);
+          const ml = P(f, 9), mr = P(f, 10);
+          const top = ml && mr ? mid(ml, mr) : P(f, 0);
+          const s = ls && rs && top ? segment(mid(ls, rs), top) : null;
+          if (s) { ctx.moveTo(s[0][0], s[0][1]); ctx.lineTo(s[1][0], s[1][1]); }
+        }
+        ctx.stroke();
       }
-      if (!skipFace) {        // MediaPipe has no neck bone: shoulders' midpoint → mouth (or nose)
-        const ls = P(f, 11), rs = P(f, 12);
-        const ml = P(f, 9), mr = P(f, 10);
-        const top = ml && mr ? mid(ml, mr) : P(f, 0);
-        const s = ls && rs && top ? segment(mid(ls, rs), top) : null;
-        if (s) { ctx.moveTo(s[0][0], s[0][1]); ctx.lineTo(s[1][0], s[1][1]); }
-      }
-      ctx.stroke();
-      ctx.fillStyle = C.joint;
       for (let i = skipFace ? FACE : 0; i < this.sk.L; i++) {
         const p = P(f, i);
         if (!p) continue;
         const c = toCam(p);
         if (c[2] < cam.near) continue;
+        const part = this.sk.pointPart[i];
+        if (skipFace && part === 'face') continue;
         const [x, y] = scr(c);
-        const r = cam.first ? clamp(cam.f * 12 / c[2], 2, 7) : 2.5;
+        const hand = HANDS.has(part);
+        const r = cam.first ? clamp(cam.f * (hand ? 5 : 8) / c[2], 1, 5) : (hand ? 1 : 1.6);
+        ctx.fillStyle = PART[part] || C.bone;
         ctx.fillRect(x - r, y - r, r * 2, r * 2);
       }
     }
@@ -421,6 +434,18 @@ const DEFAULT_SCENE = {
 function prepare(d, fpsOverride) {
   const n = d.data.length;
   const L = d.landmarks || 33;
+  // bones by part ([a, b, part]; older payloads had plain pairs: one neutral part), and each point's part
+  const bones = new Map();
+  const pointPart = new Array(L).fill(null);
+  for (const c of d.connections || []) {
+    const part = c[2] || 'torso';
+    if (!bones.has(part)) bones.set(part, []);
+    bones.get(part).push([c[0], c[1]]);
+    for (const i of [c[0], c[1]]) if (pointPart[i] == null || HANDS.has(part)) pointPart[i] = part;   // a wrist belongs to its hand
+  }
+  const parts = d.parts || { body: [0, L] };
+  const body = parts.body ? parts.body[1] - parts.body[0] : L;
+  const hands = ['left_hand', 'right_hand'].filter((k) => parts[k]).length;
   const xyz = new Float32Array(n * L * 3).fill(NaN);
   let anyPoint = false;
   for (let i = 0; i < L; i++) {
@@ -531,7 +556,7 @@ function prepare(d, fpsOverride) {
   }
 
   return {
-    n, L, take: d.take || '', point, anyPoint, connections: d.connections || [],
+    n, L, body, hands, take: d.take || '', point, anyPoint, bones, pointPart,
     fps: fpsOverride || d.fps || 30, U, B0, B1, G0, G1, zUp, center, radius, gridOrigin, head,
   };
 }

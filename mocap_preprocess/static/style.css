@@ -758,7 +758,7 @@ table.sync-clocks td.ellipsis { max-width: 170px; }
 /* ---------------------------------------------------------------- skeleton viewer */
 .skel { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .skel-mode { width: 100%; }
-.skel-vp { position: relative; aspect-ratio: 3 / 2; background: var(--rf-bg); overflow: hidden; outline: none; cursor: grab; touch-action: none; user-select: none; }
+.skel-vp { position: relative; aspect-ratio: 3 / 2; background: var(--rf-bg-light); overflow: hidden; outline: none; cursor: grab; touch-action: none; user-select: none; }   /* one colour with the card and the controls under it */
 .skel-vp.dragging { cursor: grabbing; }
 .skel-vp.first { cursor: crosshair; }
 .skel-vp:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
