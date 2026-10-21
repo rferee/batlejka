@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import wait_job
 from mocap_preprocess import config, routes_mocap, server
-from mocap_preprocess.app_state import jobs, store
+from mocap_preprocess.app_state import store
 from mocap_preprocess.fmc import env, mocap, runner
 
 ROOT = Path(__file__).resolve().parent / "_tmp" / "mocap_sessions"
@@ -129,8 +130,7 @@ def fake(monkeypatch):
 
 
 def wait(client, job):
-    j = jobs.get(job["id"])
-    assert j.done_event.wait(10), "job didn't finish"
+    wait_job(job["id"], 10)
     return client.get(f"/api/jobs/{job['id']}?log_since=0&live=1").json()
 
 
@@ -391,7 +391,8 @@ def test_takes_use_their_own_profile(fake):
     assert tomls == {"jump": "b.toml", "walk": "a.toml"}           # one FreeMoCap run per profile
     info = json.loads((paths.output / "jump" / "mocap_info.json").read_text())
     assert info["calibration"]["profile"] == b and info["calibration"]["profile_name"] == "b"
-    assert store.load(NAME)["mocap"]["takes"]["t2"] == {**store.load(NAME)["mocap"]["takes"]["t2"], "profile": b, "status": "done"}
+    rec = store.load(NAME)["mocap"]["takes"]["t2"]
+    assert rec["profile"] == b and rec["status"] == "done"
 
     # picking another calibration makes the take stale; back to the active one → follows it
     v = client.put(f"{url}/takes/t2/profile", json={"profile": None}).json()

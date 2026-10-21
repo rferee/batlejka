@@ -1,4 +1,13 @@
-# mocap-preprocess — implementation spec
+# Batlejka (mocap-preprocess) — implementation spec
+
+> **Status: historical.** This is the spec the first milestones were built from; it is
+> kept for the reasoning behind the requirements (§1, §3, §6, §12). Where it disagrees
+> with the code, the code and the README win. Known drift: the UI has eight steps
+> (Home · Process · Cameras · Sync · Cut Takes · Export · Calibrate · Mocap), not the
+> three tabs of §7; the sync is the two-stage camera-clock + windowed-audio design the
+> README describes, not the single-reference passes of §6.5; the API (§8) has grown mocap,
+> calibration-profile, preview, frame and skeleton routes, and `mocap.calibration` (§12.5)
+> is gone in favour of calibration profiles; the app needs Python 3.12.
 
 A small local web tool that turns a pile of raw multi-camera footage from a home mocap
 session into per-take, frame-synchronized videos that FreeMoCap can process directly.
@@ -71,7 +80,7 @@ reference for the main screen (see §7).
 
 ## 4. Stack and layout
 
-- Python ≥ 3.10, **FastAPI + uvicorn**, **numpy**, **scipy**. No other heavy deps.
+- Python ≥ 3.12 (`tomllib`), **FastAPI + uvicorn**, **numpy**, **scipy**. No other heavy deps.
 - Frontend: **plain HTML/CSS/JS, no build step**, served by FastAPI as static files.
 - ffmpeg/ffprobe via `subprocess` (list args). Discover with `shutil.which`, overridable
   by env vars `MOCAP_FFMPEG` / `MOCAP_FFPROBE`. If missing, the UI shows a clear error.
@@ -419,7 +428,7 @@ GET  /api/sessions                             → [{name, n_source_files, proce
 POST /api/sessions {name}                      → create source/ + output/
 GET  /api/sessions/{s}                         → full session.json + derived fps check
 POST /api/sessions/{s}/scan                    → job
-POST /api/sessions/{s}/process {settings}      → job (then starts proxies job)
+POST /api/sessions/{s}/process                 → job (then starts proxies job)
 PUT  /api/sessions/{s}/settings
 PUT  /api/sessions/{s}/cameras {cameras, assignments}
 POST /api/sessions/{s}/regroup                 → job

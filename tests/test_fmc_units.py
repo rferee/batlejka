@@ -11,7 +11,10 @@ import pytest
 from mocap_preprocess import config
 from mocap_preprocess.fmc import runner
 
-toml = pytest.importorskip("toml")
+try:
+    import toml                      # only the subset-TOML tests below need it (requirements-dev.txt)
+except ImportError:                  # pragma: no cover
+    toml = None
 
 
 def test_parse_events_and_result():
@@ -89,6 +92,8 @@ def _cam(name, k):
 
 @pytest.fixture
 def calib(tmp_path):
+    if toml is None:
+        pytest.skip("needs the toml package")
     data = {f"cam_{i}": _cam(n, i) for i, n in enumerate(["a_synced", "b_synced", "c_synced", "d_synced"])}
     data["metadata"] = {"adjusted": False, "error": 0.26}
     path = tmp_path / "calibration_camera_calibration.toml"

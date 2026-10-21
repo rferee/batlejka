@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import wait_job
 from mocap_preprocess import config, server
 from mocap_preprocess.app_state import jobs, store
 
@@ -65,8 +66,7 @@ def session():
 def wait_build(client):
     r = client.post(f"/api/sessions/{NAME}/previews/build")
     assert r.status_code == 200, r.text
-    job = jobs.get(r.json()["job"]["id"])
-    assert job.done_event.wait(60), "preview build didn't finish"
+    job = wait_job(r.json()["job"]["id"])
     assert job.status == "done", job.info(log_since=0)
     return job
 
@@ -87,7 +87,8 @@ def test_previews_listed_built_and_served(session):
     out = paths.pre / "previews" / "t2" / "c1.mp4"
     assert codecs(out) == ["h264", "aac"]                           # playable, with the take's audio
     r = client.get(url, headers={"Range": "bytes=0-99"})
-    assert r.status_code in (200, 206) and r.content[:100] == out.read_bytes()[:100]
+    assert r.status_code == 206 and r.content == out.read_bytes()[:100]      # <video> seeks with Range requests
+    assert r.headers["content-range"] == f"bytes 0-99/{out.stat().st_size}"
     assert client.get(f"/media/{NAME}/preview/t2/..%2Fx.mp4").status_code == 404
 
     # a re-run calibration rewrites the board videos: that preview is stale again

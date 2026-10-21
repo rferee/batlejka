@@ -248,10 +248,13 @@ def test_parallel_export_cancels_every_file(exported):
 
 
 def _gpu_available() -> bool:
+    ffmpeg = config.ffmpeg_path()
+    if not ffmpeg:                        # no ffmpeg: the whole module skips anyway, don't fail collection
+        return False
     try:
-        r = subprocess.run([config.ffmpeg_path(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=256x144:d=0.2",
+        r = subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=256x144:d=0.2",
                             "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True, timeout=30)
-        hw = subprocess.run([config.ffmpeg_path(), "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=30)
+        hw = subprocess.run([ffmpeg, "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=30)
         return r.returncode == 0 and "cuda" in hw.stdout
     except (OSError, subprocess.TimeoutExpired):
         return False
