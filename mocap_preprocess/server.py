@@ -268,10 +268,34 @@ def put_cameras(s: str, payload: dict = Body(...)):
             validate_fid(fid)
             if fid not in files or cid not in ids:
                 raise HTTPException(400, f"bad assignment {fid} -> {cid}")
-            files[fid]["camera"] = cid
+            f = files[fid]
+            prev = f.get("camera")
+            if prev != cid and prev is not None and "moved_from" not in f:
+                # moved by hand: remember where grouping had put it (the Cameras screen says so)
+                f["moved_from"] = {"camera": prev, "name": (old.get(prev) or {}).get("name") or prev, "at": time.time()}
+            if (f.get("moved_from") or {}).get("camera") == cid:
+                del f["moved_from"]           # back home
+            f["camera"] = cid
         used = {f.get("camera") for f in data["files"]}
         data["cameras"] = [c for c in cams if c["id"] in used]
     return session_view(name)
+
+
+_UI_KEYS = {"audio_camera": (str, type(None)), "preview": (bool,), "mocap_selected": (list,)}
+
+
+@app.put("/api/sessions/{s}/ui")
+def put_ui(s: str, payload: dict = Body(...)):
+    """A partial update of what the UI remembers per session (see session_store.default_ui)."""
+    name = _session(s)
+    for key, value in payload.items():
+        if key not in _UI_KEYS:
+            raise HTTPException(400, f"unknown ui key: {key}")
+        if not isinstance(value, _UI_KEYS[key]) or (key == "mocap_selected" and not all(isinstance(x, str) for x in value)):
+            raise HTTPException(400, f"bad value for ui.{key}")
+    with store.edit(name) as data:
+        data["ui"].update(payload)
+    return {"ui": data["ui"]}
 
 
 @app.post("/api/sessions/{s}/sync")

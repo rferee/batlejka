@@ -3,7 +3,7 @@
 // app.js imports this module, so app.js bindings are only used inside functions (circular import).
 import {
   h, icon, tip, S, GET, POST, PUT, sUrl, toast, confirmModal, activeJob, lastJob, cancelJob,
-  go, fmtDate, fmtDur, fmtBytes, prefs, render, pollSoon,
+  go, fmtDate, fmtDur, fmtBytes, prefs, putUi, render, pollSoon,
 } from './app.js';
 import * as setup from './setup.js';
 
@@ -171,7 +171,7 @@ export const MocapScreen = {
     this.saveOpts();
     this.stopLive();
     this.closeViewer();
-    Object.assign(this, { data: null, name: null, sel: new Set(), opts: null, live: null, error: null, more: false, openTake: null, details: {} });
+    Object.assign(this, { data: null, name: null, sel: new Set(), selFor: null, opts: null, live: null, error: null, more: false, openTake: null, details: {} });
   },
   update() { this.load(); },
   onJobs() { this.tick(); },
@@ -206,9 +206,13 @@ export const MocapScreen = {
   adopt(d, name) {
     if (this.name !== name) {
       this.name = name;
-      this.sel = new Set(prefs.get(`mocapSel.${name}`, []));
       this.optsDirty = false;
       this.more = false;
+      this.selFor = null;
+    }
+    if (this.selFor !== name && S.data) {      // the ticks are kept on the server, per session
+      this.sel = new Set(S.data.ui?.mocap_selected || []);
+      this.selFor = name;
     }
     this.data = d;
     if (!this.optsDirty) this.opts = { ...(d.options || {}), params: { ...(d.options?.params || {}) } };
@@ -221,7 +225,7 @@ export const MocapScreen = {
   selected() { return this.rows().filter((t) => this.sel.has(t.take_id) && this.selectable(t)); },
   setSel(ids, on) {
     for (const id of ids) { if (on) this.sel.add(id); else this.sel.delete(id); }
-    prefs.set(`mocapSel.${this.name}`, [...this.sel]);
+    putUi({ mocap_selected: [...this.sel] });
     this.render();
   },
 

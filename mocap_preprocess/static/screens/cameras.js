@@ -2,7 +2,7 @@
 import { applyFit } from '../grid.js';
 import {
   PUT, S, activeJob, basename, confirmModal, fmtClock, fmtDur, fpsLabel,
-  h, icon, mediaUrl, nextFree, onJobs, prefs, render, sUrl,
+  h, icon, mediaUrl, nextFree, onJobs, render, sUrl,
   startJob, tip, toast, videoFiles,
 } from '../app.js';
 
@@ -23,7 +23,7 @@ export const CamerasScreen = {
   saving: false,
   fits: [],
   open: {},       // camera id -> file list expanded
-  moves: {},      // file id -> {from, fromName, at}: moved by hand (drag or select); kept per browser
+  moved: {},      // file id -> moved_from note (or null) of moves not saved yet; saved ones are on the files
   mount(root) {
     this.root = h('main', { class: 'page' });
     root.append(this.root);
@@ -40,26 +40,15 @@ export const CamerasScreen = {
     this.cams = [];
     this.assign = {};
     this.open = {};
-    this.moves = {};
+    this.moved = {};
   },
   load() {
     this.cams = structuredClone(S.data?.cameras || []);
     this.assign = {};
-    this.loadMoves();
+    this.moved = {};
   },
-  // the server doesn't record which files were moved by hand, so the "moved here from …" notes and the
-  // header's "N moved by you" live in this browser; a file moved back home or a regroup clears them
-  movesKey() { return `camMoves.${S.name}`; },
-  loadMoves() {
-    const saved = prefs.get(this.movesKey(), {}) || {};
-    const files = new Map(videoFiles().map((f) => [f.id, f]));
-    this.moves = {};
-    for (const [fid, m] of Object.entries(saved)) {
-      const f = files.get(fid);
-      if (f && m && m.from && this.camOf(f) !== m.from) this.moves[fid] = m;
-    }
-  },
-  saveMoves() { prefs.set(this.movesKey(), this.moves); },
+  /** The "moved here from …" note of a file: the server's (PUT /cameras records it), or this screen's until saved. */
+  moveOf(f) { return f.id in this.moved ? this.moved[f.id] : f.moved_from; },
   update() {
     if (!this.dirty && !this.saving) this.load();
     const a = document.activeElement;
@@ -72,7 +61,7 @@ export const CamerasScreen = {
   },
   camOf(f) { return this.assign[f.id] ?? f.camera; },
   filesOf(cid) {
-    const at = (f) => this.moves[f.id]?.at || 0;
+    const at = (f) => this.moveOf(f)?.at || 0;
     return videoFiles().filter((f) => this.camOf(f) === cid)
       .sort((a, b) => at(b) - at(a) || (a.offset ?? 1e12) - (b.offset ?? 1e12) || a.rel.localeCompare(b.rel));
   },
@@ -119,12 +108,11 @@ export const CamerasScreen = {
     if (!ok) return;
     clearTimeout(this.timer);
     this.dirty = false;
-    this.moves = {};
-    this.saveMoves();
+    this.moved = {};
     await startJob('/regroup');
   },
   move(f, cid) {
-    const home = this.moves[f.id] || { from: this.camOf(f), fromName: this.cams.find((c) => c.id === this.camOf(f))?.name };
+    const was = this.camOf(f);
     if (cid === '__new') {
       const cam = {
         id: nextFree('c', new Set(this.cams.map((c) => c.id))),
@@ -135,9 +123,10 @@ export const CamerasScreen = {
       cid = cam.id;
     }
     this.assign[f.id] = cid;
-    if (!home.from || cid === home.from) delete this.moves[f.id];
-    else this.moves[f.id] = { from: home.from, fromName: home.fromName, at: Date.now() };
-    this.saveMoves();
+    // the note shows at once, by the server's own rule (PUT /cameras); the saved one replaces it
+    let note = this.moveOf(f);
+    if (!note && was && was !== cid) note = { camera: was, name: this.cams.find((c) => c.id === was)?.name || was, at: Date.now() / 1000 };
+    this.moved[f.id] = note && note.camera !== cid ? note : null;
     this.cams = this.cams.filter((c) => this.filesOf(c.id).length > 0);
     this.schedule();
     this.render();
@@ -181,7 +170,7 @@ export const CamerasScreen = {
       by[how] = (by[how] || 0) + 1;
     }
     const kinds = Object.keys(by);
-    const moved = Object.keys(this.moves).length;
+    const moved = vids.filter((f) => this.moveOf(f)).length;
     // one sentence: "Grouped 98 files under 5 cameras by metadata and background, 2 moved by you."
     const how = [];
     if (kinds.length === 1) how.push(' by ', tip(kinds[0], GROUPED_TIP[kinds[0]]));
@@ -277,7 +266,7 @@ export const CamerasScreen = {
     h('div', { class: 'meta' },
       h('span', { class: 'ellipsis', style: { color: 'var(--fg-1)' } }, f.rel),
       h('span', { class: 'dim' }, fmtDur(f.probe.duration)),
-      this.moves[f.id] ? h('span', { class: 'cam-moved' }, `moved here from ${this.moves[f.id].fromName || 'another camera'}`) : null),
+      this.moveOf(f) ? h('span', { class: 'cam-moved' }, `moved here from ${this.moveOf(f).name || 'another camera'}`) : null),
     this.moveSelect(f));
     return row;
   },

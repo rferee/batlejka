@@ -6,7 +6,7 @@ import {
   GET, METHOD_COLORS, POST, PUT, S, activeJob, api, basename,
   cameraById, confirmModal, fileById, fmtClock, fmtDate, fmtDur, fmtOffset, fmtTC,
   fpsFloat, fpsLabel, h, icon, isMounted, mediaUrl, nextFree,
-  onJobs, pad2, pollSoon, prefs, refreshSession, render, reveal, sUrl,
+  onJobs, pad2, pollSoon, prefs, putUi, refreshSession, render, reveal, sUrl,
   targetFps, tip, toast, videoFiles,
   METHOD_LABEL,
 } from '../app.js';
@@ -188,7 +188,6 @@ export const ReviewScreen = {
     this.onKey = (e) => this.key(e);
     window.addEventListener('keydown', this.onKey);
     this.sideSel = null;    // reveal the selected take (e.g. picked on Export) once
-    if (RV.preview === undefined) RV.preview = prefs.get('preview', false);   // Preview: FreeMoCap's videos in the tiles
     this.adopt();
     this.renderAll();
     this.loadPreviews();
@@ -247,7 +246,7 @@ export const ReviewScreen = {
   },
   async togglePreview() {
     RV.preview = !RV.preview;
-    prefs.set('preview', RV.preview);
+    putUi({ preview: RV.preview });
     this.buildGridFiles();
     if (RV.playing) this.grid.tick(RV.t); else this.grid.show(RV.t);
     this.renderTransportButtons();
@@ -271,11 +270,12 @@ export const ReviewScreen = {
     }
     if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
     if (RV.sel && RV.sel.kind === 'file' && !fileById(RV.sel.id)) RV.sel = null;
-    const key = `audio.${S.name}`;
-    if (RV.audioCam === undefined || RV.audioKey !== key) {
-      RV.audioKey = key;
+    if (RV.uiFor !== S.name) {     // what this session's UI remembers: on the server, so every browser agrees
+      RV.uiFor = S.name;
+      const ui = S.data.ui || {};
       const ref = videoFiles().find((f) => f.sync?.method === 'reference');
-      RV.audioCam = prefs.get(key, ref ? ref.camera : (S.data.cameras[0] || {}).id || null);
+      RV.audioCam = ui.audio_camera ?? (ref ? ref.camera : (S.data.cameras[0] || {}).id || null);
+      RV.preview = !!ui.preview;   // Preview: FreeMoCap's videos in the tiles
     }
     RV.t = Math.min(RV.t, sessionSpan());
   },
@@ -783,7 +783,7 @@ export const ReviewScreen = {
             class: 'input',
             onchange: (e) => {
               RV.audioCam = e.target.value || null;
-              prefs.set(RV.audioKey, RV.audioCam);
+              putUi({ audio_camera: RV.audioCam });
               this.grid.setAudio(RV.audioCam);
             },
           }, h('option', { value: '' }, 'muted'),

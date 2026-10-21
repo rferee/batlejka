@@ -157,6 +157,12 @@ def default_export_options() -> dict:
     return opts
 
 
+def default_ui() -> dict:
+    """What the UI remembers per session, so every browser sees the same: the camera whose
+    audio plays in Cut Takes, its Preview toggle, and the takes ticked on the Mocap step."""
+    return {"audio_camera": None, "preview": False, "mocap_selected": []}
+
+
 def default_session(name: str) -> dict:
     return {
         "version": SESSION_VERSION,
@@ -168,6 +174,7 @@ def default_session(name: str) -> dict:
         "sync": {},
         "export_options": default_export_options(),
         "mocap": default_mocap(),
+        "ui": default_ui(),
         "state": {"scanned_at": None, "processed_at": None, "synced_at": None, "exported_at": None},
     }
 
@@ -177,7 +184,7 @@ def _normalize(data: dict, name: str) -> dict:
     for key, value in base.items():
         if key not in data or data[key] is None:
             data[key] = value
-    for key in ("settings", "export_options", "state"):
+    for key in ("settings", "export_options", "state", "ui"):
         merged = copy.deepcopy(base[key])
         merged.update(data.get(key) or {})
         data[key] = merged

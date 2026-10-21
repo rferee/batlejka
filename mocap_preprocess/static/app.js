@@ -329,6 +329,14 @@ export async function reveal(what) {
   try { await POST(sUrl('/reveal'), { what }); } catch (e) { toast(e.message, 'error'); }
 }
 
+/** Part of what the UI remembers for this session (session.json "ui", so every browser agrees):
+ *  applied at once, saved in the background. */
+export function putUi(patch) {
+  if (!S.data) return;
+  S.data.ui = { ...(S.data.ui || {}), ...patch };
+  PUT(sUrl('/ui'), patch).catch((e) => toast(`Couldn't save the UI state: ${e.message}`, 'error'));
+}
+
 // ------------------------------------------------------------------ navigation / data
 const screens = {};
 let mounted = null;
@@ -531,14 +539,14 @@ for (const id of ['cameras', 'sync', 'review']) {
 
 // ------------------------------------------------------------------ boot
 async function boot() {
-  loadSetup();     // not awaited: the Setup card fills in when it's ready
   try { S.health = await GET('/api/health'); } catch { S.health = null; }
   const fromHash = parseHash();
   if (fromHash) {
     S.name = fromHash.name;
     if (fromHash.step && STEPS.some((s) => s.id === fromHash.step)) S.step = fromHash.step;
   }
-  await loadSessions();
+  // nothing is rendered before the session is open: a screen mounted without S.data starts wrong
+  try { S.sessions = await GET('/api/sessions'); } catch (e) { toast(e.message, 'error'); }
   if (S.name && S.sessions.some((s) => s.name === S.name)) {
     await openSession(S.name);
   } else {
@@ -546,6 +554,7 @@ async function boot() {
     S.step = 'session';
     render();
   }
+  loadSetup();     // not awaited: the Setup card fills in when it's ready
   pollSoon();
 }
 boot();

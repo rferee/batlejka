@@ -84,6 +84,70 @@ def test_cameras_put_rotation_is_only_stored(client):
     client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {}})
 
 
+def _wait(job):
+    from mocap_preprocess.app_state import jobs
+    assert jobs.get(job["id"]).done_event.wait(20), "job didn't finish"
+
+
+def test_ui_state_is_kept_on_the_server(client):
+    """What the UI remembers per session (audio camera, Preview, ticked mocap takes) lives in
+    session.json, so another browser sees the same thing."""
+    d = client.get(f"/api/sessions/{NAME}").json()
+    assert d["ui"] == {"audio_camera": None, "preview": False, "mocap_selected": []}
+    cam = d["cameras"][0]["id"]
+    r = client.put(f"/api/sessions/{NAME}/ui", json={"audio_camera": cam, "mocap_selected": ["t1", "t2"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["ui"] == {"audio_camera": cam, "preview": False, "mocap_selected": ["t1", "t2"]}
+    r = client.put(f"/api/sessions/{NAME}/ui", json={"preview": True})           # a partial update keeps the rest
+    assert r.json()["ui"] == {"audio_camera": cam, "preview": True, "mocap_selected": ["t1", "t2"]}
+    assert client.get(f"/api/sessions/{NAME}").json()["ui"]["preview"] is True
+    assert client.put(f"/api/sessions/{NAME}/ui", json={"bogus": 1}).status_code == 400
+    assert client.put(f"/api/sessions/{NAME}/ui", json={"mocap_selected": "t1"}).status_code == 400
+    assert client.put(f"/api/sessions/{NAME}/ui", json={"audio_camera": 5}).status_code == 400
+    client.put(f"/api/sessions/{NAME}/ui", json={"audio_camera": None, "preview": False, "mocap_selected": []})
+
+
+def test_cameras_put_records_manual_moves(client):
+    """Moving a file to another camera by hand is remembered on the file (moved_from); moving it
+    back home forgets it; a regroup forgets all of them."""
+    d = client.get(f"/api/sessions/{NAME}").json()
+    cams = d["cameras"]
+    assert len(cams) >= 2
+    home, other = cams[0], cams[1]
+    f = next(x for x in d["files"] if x["camera"] == home["id"])
+    assert "moved_from" not in f
+    r = client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {f["id"]: other["id"]}})
+    assert r.status_code == 200, r.text
+    moved = next(x for x in r.json()["files"] if x["id"] == f["id"])
+    assert moved["camera"] == other["id"]
+    assert moved["moved_from"]["camera"] == home["id"] and moved["moved_from"]["name"] == home["name"]
+    assert moved["moved_from"]["at"] > 0
+    # a second move keeps the original home
+    third = cams[2] if len(cams) > 2 else home
+    r = client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {f["id"]: third["id"]}})
+    moved = next(x for x in r.json()["files"] if x["id"] == f["id"])
+    if third is home:
+        assert "moved_from" not in moved
+    else:
+        assert moved["moved_from"]["camera"] == home["id"]
+    # back home: forgotten
+    r = client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {f["id"]: home["id"]}})
+    moved = next(x for x in r.json()["files"] if x["id"] == f["id"])
+    assert moved["camera"] == home["id"] and "moved_from" not in moved
+
+
+def test_regroup_clears_manual_moves(client):
+    d = client.get(f"/api/sessions/{NAME}").json()
+    cams = d["cameras"]
+    f = next(x for x in d["files"] if x["camera"] == cams[0]["id"])
+    client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {f["id"]: cams[1]["id"]}})
+    assert "moved_from" in next(x for x in client.get(f"/api/sessions/{NAME}").json()["files"] if x["id"] == f["id"])
+    _wait(client.post(f"/api/sessions/{NAME}/regroup").json())
+    after = client.get(f"/api/sessions/{NAME}").json()
+    assert all("moved_from" not in x for x in after["files"])
+    assert next(x for x in after["files"] if x["id"] == f["id"])["camera"] == cams[0]["id"]   # grouping is deterministic
+
+
 def test_dropped_connection_still_closes_its_socket():
     import socket
     import sys
