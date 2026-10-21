@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, HTTPException
 
 from .app_state import jobs, require_session, store
 from .fmc import env, mocap
+from .routes_previews import after_mocap_job
 
 router = APIRouter()
 
@@ -161,7 +162,10 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
             if f.is_file():
                 f.unlink()
                 job.log(f"{take['name']}: deleted leftover {mocap.VIDEO_DIR}/{fn}", "warn")
-        return mocap.run_calibrate(store, name, job, pid)
+        try:
+            return mocap.run_calibrate(store, name, job, pid)
+        finally:
+            after_mocap_job(name, job)      # its board videos get previews for Cut Takes
 
     job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}")
     job.live = {"profile": pid}
@@ -287,8 +291,11 @@ def process(s: str, payload: dict = Body(...)):
     processes = opts.get("processes") or mocap.default_processes(max(len(t["cameras"]) for t in takes))
 
     def run(job):
-        return mocap.run_process(store, name, job, takes, processes, blender=bool(opts.get("blender")),
-                                 blender_exe=opts.get("blender_exe"), delete=leftovers if delete_leftovers else None,
-                                 params=params)
+        try:
+            return mocap.run_process(store, name, job, takes, processes, blender=bool(opts.get("blender")),
+                                     blender_exe=opts.get("blender_exe"), delete=leftovers if delete_leftovers else None,
+                                     params=params)
+        finally:
+            after_mocap_job(name, job)      # the skeleton videos get previews for Cut Takes
 
     return _job_response(jobs.start(PROCESS, name, run, label="Process mocap"))

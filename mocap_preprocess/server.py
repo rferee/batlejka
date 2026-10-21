@@ -14,11 +14,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from . import ffmpeg_tools as ff
-from . import exporter, grouping, pipeline, syncing
+from . import exporter, grouping, pipeline, previews, syncing
 from . import takes as takes_mod
 from .app_state import jobs, require_session, store
 from .jobs import JobConflict
 from .routes_mocap import router as mocap_router
+from .routes_previews import router as previews_router
 from .routes_setup import router as setup_router
 from .routes_skeleton import router as skeleton_router
 from .session_store import InvalidName, SessionNotFound, validate_fid, validate_session_name
@@ -437,6 +438,24 @@ def _range_response(path: Path, media_type: str, request: Request) -> Response:
 _MEDIA = {"thumb": ("jpg", "image/jpeg"), "proxy": ("mp4", "video/mp4"), "wave": ("json", "application/json")}
 
 
+_PLAIN_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")   # take and camera ids (t12, c2)
+
+
+@app.get("/media/{s}/preview/{take_id}/{filename}")
+def media_preview(s: str, take_id: str, filename: str, request: Request):
+    """A Cut Takes preview (previews.py): .preprocess/previews/<take id>/<camera id>.mp4."""
+    name = _session(s)
+    stem, dot, ext = filename.rpartition(".")
+    if not dot or ext != "mp4":
+        raise HTTPException(404, "not found")
+    if not (_PLAIN_ID.match(take_id) and _PLAIN_ID.match(stem)):
+        raise HTTPException(404, "not found")
+    path = previews.preview_path(store.paths(name), take_id, stem)
+    if not path.is_file():
+        raise HTTPException(404, "not built yet")
+    return _range_response(path, "video/mp4", request)
+
+
 @app.get("/media/{s}/{kind}/{filename}")
 def media(s: str, kind: str, filename: str, request: Request):
     name = _session(s)
@@ -465,4 +484,5 @@ def index():
 app.include_router(setup_router)
 app.include_router(mocap_router)
 app.include_router(skeleton_router)
+app.include_router(previews_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")

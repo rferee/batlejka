@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from mocap_preprocess import config, server
+from mocap_preprocess import config, routes_mocap, server
 from mocap_preprocess.app_state import jobs, store
 from mocap_preprocess.fmc import env, mocap, runner
 
@@ -119,6 +119,8 @@ def fake(monkeypatch):
         (paths.output / nm / "take_info.json").write_text(json.dumps(info))
     fr = FakeRunner()
     monkeypatch.setattr(runner, "run_headless", fr)
+    # no background preview builds here: they'd outlive the test and read the next one's session
+    monkeypatch.setattr(routes_mocap, "after_mocap_job", lambda name, job: None)
     monkeypatch.setattr(env, "ready", lambda: True)
     yield TestClient(server.app), fr, paths
     config.set_sessions_dir(prev)
