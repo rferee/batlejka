@@ -15,7 +15,7 @@ from . import config
 from . import ffmpeg_tools as ff
 from . import grouping, syncing
 from .jobs import Job
-from .session_store import SessionStore, file_id, now
+from .session_store import SessionStore, file_id, now, video_files
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +130,6 @@ def scan(store: SessionStore, name: str, job: Job | None = None) -> dict:
     if job:
         job.log(f"scan done: {summary}")
     return summary
-
-
-def video_files(data: dict) -> list[dict]:
-    return [f for f in data["files"] if f.get("probe") and f["probe"].get("video")]
 
 
 def prefill_target_fps(data: dict) -> None:

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -34,7 +32,8 @@ console = logging.getLogger("mocap.http")
 class ConsoleLog:
     """Changes made from the UI (anything but GET) and server errors, one line each on the
     console; the steady polling and video streaming stay quiet. Plain ASGI, so responses
-    stream through untouched."""
+    stream through untouched. Also marks the UI's own files no-cache, so an edited
+    stylesheet or module shows up on the next load."""
 
     def __init__(self, app):
         self.app = app
@@ -44,10 +43,13 @@ class ConsoleLog:
             return await self.app(scope, receive, send)
         t0 = time.perf_counter()
         seen = {}
+        ui_file = scope["path"] == "/" or scope["path"].startswith("/static/")
 
         async def send_status(message):
             if message["type"] == "http.response.start":
                 seen["status"] = message["status"]
+                if ui_file:
+                    message["headers"] = [*message.get("headers", []), (b"cache-control", b"no-cache")]
             await send(message)
 
         try:
@@ -84,15 +86,6 @@ async def _conflict(_: Request, exc: JobConflict):
 @app.exception_handler(ff.ToolMissing)
 async def _tool_missing(_: Request, exc: ff.ToolMissing):
     return JSONResponse({"detail": str(exc)}, status_code=503)
-
-
-@app.middleware("http")
-async def _no_cache_ui(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if path == "/" or path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-cache"
-    return response
 
 
 def _require_tools() -> None:
@@ -388,11 +381,7 @@ def reveal(s: str, payload: dict = Body(default={})):
             raise HTTPException(404, f"no such folder in output/: {sub!r}")
         target = cand
     target.mkdir(parents=True, exist_ok=True)
-    if os.name == "nt":
-        os.startfile(str(target))  # noqa: S606 - local tool, path is ours
-    else:
-        opener = "open" if sys.platform == "darwin" else "xdg-open"
-        subprocess.Popen([opener, str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    config.open_in_os(target)
     return {"opened": str(target)}
 
 

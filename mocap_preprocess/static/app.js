@@ -1,4 +1,4 @@
-// mocap-preprocess UI. Plain ES modules, no build step.
+// Batlejka UI. Plain ES modules, no build step.
 import { loadSetup } from './setup.js';
 import { SessionScreen } from './screens/session.js';
 import { ProcessScreen } from './screens/process.js';

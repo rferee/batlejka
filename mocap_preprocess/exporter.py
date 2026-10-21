@@ -19,11 +19,22 @@ from pathlib import Path
 
 from . import ffmpeg_tools as ff
 from .jobs import Job
-from .session_store import SessionStore, now, sanitize_filename, write_json_atomic
+from .session_store import SessionStore, now, placed_video_files, sanitize_filename, write_json_atomic
 
 ROTATE = {90: "transpose=1", 180: "transpose=1,transpose=1", 270: "transpose=2"}
 MAX_PARALLEL = 3
 NVENC_PRESETS = ("p1", "p2", "p3", "p4", "p5", "p6", "p7")
+OUTPUT_TAIL = ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]     # before the output path
+
+
+def encoder_args(options: dict) -> list:
+    """The H.264 encoder from the export options: NVENC at CQ = crf + 2 (about libx264's look
+    at that CRF), else libx264 medium at the CRF."""
+    crf = int(options.get("crf", 17))
+    if options.get("encoder") == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", options.get("nvenc_preset", "p5"), "-rc", "vbr",
+                "-cq", str(crf + 2), "-b:v", "0"]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
 
 
 @dataclass
@@ -98,7 +109,7 @@ def plan_segments(take: dict, files: list[dict], fps: Fraction) -> list[Segment]
 def plan_take(data: dict, take: dict, camera_ids: list[str], fps: Fraction | None = None) -> tuple[list[CamPlan], list[dict]]:
     fps = fps or target_fraction(data)
     cams = {c["id"]: c for c in data["cameras"]}
-    files = [f for f in data["files"] if f.get("probe") and f["probe"].get("video") and f.get("offset") is not None]
+    files = placed_video_files(data)
     plans, skipped, used = [], [], set()
     for cid in camera_ids:
         cam = cams.get(cid)
@@ -183,21 +194,14 @@ def build_command(src: Path, out: Path, plan: CamPlan, fps: Fraction, n_frames: 
         # pad whatever the file is missing at the end, plus a margin
         vf.append(f"tpad=stop_duration={plan.post + margin:.6f}:color=black")
         vf.append("format=yuv420p")
-    args += ["-vf", ",".join(vf), "-frames:v", str(n_frames)]
-    crf = int(options.get("crf", 17))
-    if nvenc:
-        args += ["-c:v", "h264_nvenc", "-preset", options.get("nvenc_preset", "p5"), "-rc", "vbr",
-                 "-cq", str(crf + 2), "-b:v", "0"]
-    else:
-        args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+    args += ["-vf", ",".join(vf), "-frames:v", str(n_frames)] + encoder_args(options)
     if with_audio:
         delay = int(round(plan.pre * 1000))
         args += ["-map", "1:a:0", "-af", f"adelay={delay}:all=1,apad", "-c:a", "aac", "-b:a", "160k",
                  "-t", f"{n_frames / float(fps):.6f}"]
     else:
         args += ["-an"]
-    args += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", out]
-    return args
+    return args + OUTPUT_TAIL + [out]
 
 
 def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fraction, n_frames: int, options: dict,
@@ -208,7 +212,6 @@ def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fracti
     for the breaks and for files without sound."""
     fps_s = ff.frac_str(fps)
     F = float(fps)
-    nvenc = options.get("encoder") == "h264_nvenc"
     margin = max(1, math.ceil(0.25 * F))     # extra frames past each file's end
     segs = plan.segments
     tail = n_frames - sum(sg.gap + sg.frames for sg in segs)
@@ -265,19 +268,12 @@ def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fracti
     graph.append(f"{vs}concat=n={len(segs)}:v=1:a=0" + ("[v]" if hwaccel else ",format=yuv420p[v]"))
     if with_audio:
         graph.append(f"{als}concat=n={len(segs)}:v=0:a=1[a]")
-    args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-frames:v", str(n_frames)]
-    crf = int(options.get("crf", 17))
-    if nvenc:
-        args += ["-c:v", "h264_nvenc", "-preset", options.get("nvenc_preset", "p5"), "-rc", "vbr",
-                 "-cq", str(crf + 2), "-b:v", "0"]
-    else:
-        args += ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+    args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-frames:v", str(n_frames)] + encoder_args(options)
     if with_audio:
         args += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k", "-t", f"{n_frames / F:.6f}"]
     else:
         args += ["-an"]
-    args += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", out]
-    return args
+    return args + OUTPUT_TAIL + [out]
 
 
 def normalize_options(options: dict, defaults: dict) -> dict:

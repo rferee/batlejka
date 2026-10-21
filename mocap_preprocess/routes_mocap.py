@@ -1,12 +1,9 @@
 """/api/sessions/{s}/mocap...: FreeMoCap calibration profiles and processing of exported takes."""
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-
 from fastapi import APIRouter, Body, HTTPException
 
+from . import config
 from .app_state import jobs, require_session, store
 from .fmc import env, mocap
 from .routes_previews import after_mocap_job
@@ -205,11 +202,7 @@ def open_blend(s: str, tid: str):
         path = mocap.blend_path(store, name, str(tid))
     except mocap.MocapError as e:
         raise HTTPException(404, str(e))
-    if os.name == "nt":
-        os.startfile(str(path))  # noqa: S606 - local tool, path checked to be inside the take folder
-    else:
-        opener = "open" if sys.platform == "darwin" else "xdg-open"
-        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    config.open_in_os(path)          # blend_path checked it's inside the take folder
     return {"opened": str(path)}
 
 
@@ -232,16 +225,20 @@ def process(s: str, payload: dict = Body(...)):
         mocap.check_params(params)
     except mocap.MocapError as e:
         raise HTTPException(400, str(e))
+    described = mocap.described_takes(store, name)     # one pass over output/ for all of them
+    paths = store.paths(name)
     takes, problems, leftovers = [], [], {}
     for tid in dict.fromkeys(take_ids):
-        tk = _described(name, tid)
+        tk = described.get(tid)
+        if tk is None:
+            raise HTTPException(400, f"take {tid!r} hasn't been exported")
         prof = mocap.get_profile(data, tk["profile"]) if tk["profile"] else None
-        skipped = mocap.skipped_stage_missing(store.paths(name).output / tk["dir"], params)
+        skipped = mocap.skipped_stage_missing(paths.output / tk["dir"], params)
         if tk["is_calibration"]:
             problems.append(f"{tk['name']} is a calibration take")
         elif not mocap.calibrated(prof):
             problems.append(f"{tk['name']}: no calibrated profile — calibrate one on the Calibrate step")
-        elif not (store.paths(name).root / prof["toml"]).is_file():
+        elif not (paths.root / prof["toml"]).is_file():
             problems.append(f"{tk['name']}: {prof['name']}'s calibration file is gone ({prof['toml']}) — recalibrate it")
         elif not tk["layout_ok"]:
             problems.append(f"{tk['name']}: no synchronized_videos/ folder (flat layout?)")

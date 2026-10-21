@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import config
+from .fmc import env
 
 FFMPEG_INSTALL_HINT = ("Install it with `winget install Gyan.FFmpeg` or `scoop install ffmpeg` and restart, "
                        "or point MOCAP_FFMPEG / MOCAP_FFPROBE at the executables.")
@@ -95,12 +96,8 @@ def tool_version(name: str, exe: str | None) -> dict:
 
 def uv_path() -> str | None:
     """uv from the app's own venv (requirements.txt pins it), else PATH."""
-    try:
-        from uv import find_uv_bin
-
-        return str(find_uv_bin())
-    except Exception:  # noqa: BLE001 - package missing or no binary
-        return shutil.which("uv")
+    found = env.uv_bin()
+    return str(found) if found else None
 
 
 # ---------------------------------------------------------------------------
@@ -203,31 +200,15 @@ def preferred_encoder() -> str:
 # ---------------------------------------------------------------------------
 # the panel
 
-def _env():
-    from .fmc import env
-
-    return env
-
-
 def _fmt_time(t) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) if t else "?"
 
 
 def _job_action(job: dict | None) -> str | None:
-    """Which FreeMoCap action an active setup job is (from its label)."""
+    """Which FreeMoCap action an active setup job is (routes_setup starts them with env.ACTIONS' labels)."""
     if not job:
         return None
-    try:
-        for action, (_fn, label) in _env().ACTIONS.items():
-            if label == job.get("label"):
-                return action
-    except Exception:  # noqa: BLE001
-        pass
-    label = (job.get("label") or "").lower()
-    for action in ("install", "repair", "remove"):
-        if action in label:
-            return action
-    return "selftest" if "test" in label else None
+    return next((action for action, (_fn, label) in env.ACTIONS.items() if label == job.get("label")), None)
 
 
 def _busy_row(base: dict, job: dict) -> dict:
@@ -354,8 +335,7 @@ def get_setup(refresh: bool = False, busy_job: dict | None = None) -> dict:
             _cache = _collect(refresh)
             console.info("setup checked in %.1f s", time.perf_counter() - t0)
         c = _cache
-    env = _env()
-    if refresh and busy_job is None and hasattr(env, "check"):
+    if refresh and busy_job is None:
         try:
             if env.status().get("state") != "not_installed":
                 env.check()

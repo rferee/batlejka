@@ -23,8 +23,10 @@ import time
 import tomllib
 from pathlib import Path
 
+import numpy as np
+
 from .. import config
-from ..ffmpeg_tools import Cancelled
+from ..ffmpeg_tools import Cancelled, fps_float
 from ..session_store import sanitize_filename, write_json_atomic
 from . import runner
 
@@ -471,16 +473,27 @@ def view(store, name: str, freemocap: dict, process_jobs=(), calibrate_jobs=()) 
     }
 
 
-def find_take(store, name: str, take_id: str) -> tuple[dict, dict]:
-    """(exported entry, described take) for ``take_id``, or MocapError."""
+def _describe_all(store, name: str) -> list[tuple[dict, dict]]:
+    """(exported entry, described take) for every exported take: one read of the session,
+    the profiles' TOMLs and output/."""
     data = store.load(name)
     paths = store.paths(name)
     prof_cams = {p["id"]: _profile_cameras(paths, p) for p in profiles(data)}
     calib_takes = {p.get("take_id") for p in profiles(data)}
     params = effective_params(data)
-    for e in exported_takes(paths, data):
+    return [(e, describe_take(e, data, prof_cams, set(), calib_takes, params)) for e in exported_takes(paths, data)]
+
+
+def described_takes(store, name: str) -> dict[str, dict]:
+    """Every exported take, described, by take id."""
+    return {e["info"]["id"]: tk for e, tk in _describe_all(store, name)}
+
+
+def find_take(store, name: str, take_id: str) -> tuple[dict, dict]:
+    """(exported entry, described take) for ``take_id``, or MocapError."""
+    for e, tk in _describe_all(store, name):
         if e["info"]["id"] == take_id:
-            return e, describe_take(e, data, prof_cams, set(), calib_takes, params)
+            return e, tk
     raise MocapError(f"take {take_id!r} hasn't been exported")
 
 
@@ -519,8 +532,6 @@ PARAM_SPEC = {
 
 
 def session_fps(data: dict) -> float:
-    from ..ffmpeg_tools import fps_float
-
     return round(fps_float(data["settings"].get("target_fps")) or 30.0, 3)
 
 
@@ -842,12 +853,10 @@ def run_process(store, name: str, job, takes: list[dict], processes: int,
 # take detail (Mocap step: what FreeMoCap produced for one take)
 
 BODY_POINTS = 33          # MediaPipe pose landmarks come first in FreeMoCap's tracked points
-_detail_cache: dict = {}  # (take dir, files' mtimes) -> computed quality
+_detail_cache: dict = {}  # take dir -> (files' mtimes, computed quality); one entry per take
 
 
 def _bone(body, a: int, b: int) -> list | None:
-    import numpy as np
-
     d = np.linalg.norm(body[:, a] - body[:, b], axis=1)
     d = d[np.isfinite(d)]
     if not d.size:
@@ -860,8 +869,6 @@ def _quality(take_dir: Path) -> dict | None:
     """Numbers from FreeMoCap's own arrays: mean reprojection error of the body points,
     frames with the whole body, gaps its post-processing filled, two bone lengths, and
     how often each camera saw the body. Cached by the files' mtimes."""
-    import numpy as np
-
     out = take_dir / "output_data"
     body_f = next(iter(sorted(out.glob("*_body_3d_xyz.npy"))), None)
     if body_f is None:
@@ -871,9 +878,10 @@ def _quality(take_dir: Path) -> dict | None:
     xyz_f = next(iter(sorted(raw.glob("*_3dData_numFrames_numTrackedPoints_spatialXYZ.npy"))), None)
     px_f = next(iter(sorted(raw.glob("*_2dData_numCams_numFrames_numTrackedPoints_pixelXY.npy"))), None)
     files = [f for f in (body_f, reproj_f, xyz_f, px_f) if f is not None]
-    key = (str(take_dir), tuple((f.name, f.stat().st_mtime) for f in files))
-    if key in _detail_cache:
-        return _detail_cache[key]
+    stamp = tuple((f.name, f.stat().st_mtime) for f in files)
+    cached = _detail_cache.get(str(take_dir))
+    if cached and cached[0] == stamp:
+        return cached[1]
     q: dict = {}
     try:
         body = np.asarray(np.load(body_f, mmap_mode="r")[:, :BODY_POINTS, :], dtype=float)
@@ -906,7 +914,7 @@ def _quality(take_dir: Path) -> dict | None:
             q["camera_detected_pct"] = seen
     except (OSError, ValueError, IndexError) as e:
         q["error"] = f"couldn't read FreeMoCap's output: {e}"
-    _detail_cache[key] = q
+    _detail_cache[str(take_dir)] = (stamp, q)
     return q
 
 

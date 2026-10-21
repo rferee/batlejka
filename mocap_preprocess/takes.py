@@ -3,18 +3,15 @@ from __future__ import annotations
 
 import re
 
+from .session_store import placed_video_files
+
 CONTINUOUS_FRACTION = 0.6   # files this long relative to the session are ignored for clustering
 MERGE_GAP = 2.0             # clips closer than this belong to the same take
 MIN_TAKE = 1.0
 
 
-def _placed(data: dict) -> list[dict]:
-    return [f for f in data["files"]
-            if f.get("probe") and f["probe"].get("video") and f.get("offset") is not None]
-
-
 def detect(data: dict) -> list[dict]:
-    files = _placed(data)
+    files = placed_video_files(data)
     if not files:
         return []
     spans = [(f, f["offset"], f["offset"] + float(f["probe"].get("duration") or 0)) for f in files]

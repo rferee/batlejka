@@ -60,6 +60,16 @@ def sanitize_filename(name: str, fallback: str = "untitled") -> str:
     return s[:120]
 
 
+def video_files(data: dict) -> list[dict]:
+    """The session's files that ffprobe found a video stream in."""
+    return [f for f in data["files"] if f.get("probe") and f["probe"].get("video")]
+
+
+def placed_video_files(data: dict) -> list[dict]:
+    """Video files that have a position on the session timeline."""
+    return [f for f in video_files(data) if f.get("offset") is not None]
+
+
 class SessionPaths:
     def __init__(self, name: str):
         name = validate_session_name(name)
@@ -217,6 +227,7 @@ def write_json_atomic(path: Path, data) -> None:
 class SessionStore:
     def __init__(self):
         self._locks: dict[str, threading.RLock] = {}
+        self._paths: dict[tuple[str, str], SessionPaths] = {}
         self._guard = threading.Lock()
 
     def lock(self, name: str) -> threading.RLock:
@@ -224,7 +235,12 @@ class SessionStore:
             return self._locks.setdefault(name, threading.RLock())
 
     def paths(self, name: str) -> SessionPaths:
-        return SessionPaths(name)
+        """The session's folders; built once per name (and sessions dir, which tests swap)."""
+        key = (str(config.sessions_dir()), name)
+        p = self._paths.get(key)
+        if p is None:
+            p = self._paths[key] = SessionPaths(name)
+        return p
 
     def exists(self, name: str) -> bool:
         return self.paths(name).root.is_dir()
