@@ -82,3 +82,34 @@ def test_cameras_put_rotation_is_only_stored(client):
     assert client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": [{**cams[0], "rotation": 45}], "assignments": {}}).status_code == 400
     cams[0]["rotation"] = 0
     client.put(f"/api/sessions/{NAME}/cameras", json={"cameras": cams, "assignments": {}})
+
+
+def test_dropped_connection_still_closes_its_socket():
+    import socket
+    import sys
+    from asyncio import proactor_events
+
+    from mocap_preprocess import aio_fix
+    if sys.platform != "win32":
+        pytest.skip("Windows proactor loop only")
+    assert aio_fix.install()
+    closed = []
+
+    class Sock:
+        def fileno(self):
+            return 5
+
+        def shutdown(self, how):
+            raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+
+        def close(self):
+            closed.append(True)
+
+    class Protocol:
+        def connection_lost(self, exc):
+            closed.append("protocol")
+
+    t = object.__new__(proactor_events._ProactorBasePipeTransport)
+    t._called_connection_lost, t._protocol, t._sock, t._server = False, Protocol(), Sock(), None
+    t._call_connection_lost(None)          # used to raise, skipping close()
+    assert closed == ["protocol", True] and t._sock is None and t._called_connection_lost

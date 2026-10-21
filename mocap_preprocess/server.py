@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config
+from . import aio_fix, config
 from . import ffmpeg_tools as ff
 from . import exporter, grouping, pipeline, previews, syncing
 from . import takes as takes_mod
@@ -24,6 +24,9 @@ from .routes_previews import router as previews_router
 from .routes_setup import router as setup_router
 from .routes_skeleton import router as skeleton_router
 from .session_store import InvalidName, SessionNotFound, validate_fid, validate_session_name
+
+
+aio_fix.install()     # dropped video connections: no tracebacks, no leaked sockets
 
 app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
