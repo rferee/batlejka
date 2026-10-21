@@ -60,6 +60,16 @@ def sanitize_filename(name: str, fallback: str = "untitled") -> str:
     return s[:120]
 
 
+def video_files(data: dict) -> list[dict]:
+    """The session's files that ffprobe found a video stream in."""
+    return [f for f in data["files"] if f.get("probe") and f["probe"].get("video")]
+
+
+def placed_video_files(data: dict) -> list[dict]:
+    """Video files that have a position on the session timeline."""
+    return [f for f in video_files(data) if f.get("offset") is not None]
+
+
 class SessionPaths:
     def __init__(self, name: str):
         name = validate_session_name(name)
@@ -116,20 +126,21 @@ class SessionPaths:
 
 
 def default_mocap() -> dict:
-    return {"profiles": [], "active_profile": None, "calibration": None,
+    return {"profiles": [], "active_profile": None,
             "options": {"processes": None, "blender": False, "blender_exe": None, "params": {}}, "takes": {}}
 
 
 def _migrate_mocap(mocap: dict) -> None:
     """Sessions from before calibration profiles had one ``mocap.calibration``: it becomes
-    the first (active) profile. Pure data — its TOML is copied away lazily, when another
-    calibration of the same take would overwrite it (fmc.mocap)."""
+    the first (active) profile and the old key goes (later versions mirrored the active
+    profile there; nothing reads it now). Pure data — its TOML is copied away lazily, when
+    another calibration of the same take would overwrite it (fmc.mocap)."""
+    old = mocap.pop("calibration", None)
     if isinstance(mocap.get("profiles"), list):
         mocap.setdefault("active_profile", None)
         return
     mocap["profiles"] = []
     mocap["active_profile"] = None
-    old = mocap.get("calibration")
     if not isinstance(old, dict) or not old.get("toml"):
         return
     sq = old.get("square_mm")
@@ -144,7 +155,6 @@ def _migrate_mocap(mocap: dict) -> None:
         "calibrated_with": dict(settings),
     })
     mocap["active_profile"] = "p1"
-    old.update(profile="p1", profile_name=name)
 
 
 def default_export_options() -> dict:
@@ -155,6 +165,12 @@ def default_export_options() -> dict:
     except Exception:  # noqa: BLE001 - never let a probe cache problem break loading a session
         pass
     return opts
+
+
+def default_ui() -> dict:
+    """What the UI remembers per session, so every browser sees the same: the camera whose
+    audio plays in Cut Takes, its Preview toggle, and the takes ticked on the Mocap step."""
+    return {"audio_camera": None, "preview": False, "mocap_selected": []}
 
 
 def default_session(name: str) -> dict:
@@ -168,6 +184,7 @@ def default_session(name: str) -> dict:
         "sync": {},
         "export_options": default_export_options(),
         "mocap": default_mocap(),
+        "ui": default_ui(),
         "state": {"scanned_at": None, "processed_at": None, "synced_at": None, "exported_at": None},
     }
 
@@ -177,12 +194,11 @@ def _normalize(data: dict, name: str) -> dict:
     for key, value in base.items():
         if key not in data or data[key] is None:
             data[key] = value
-    for key in ("settings", "export_options", "state"):
+    for key in ("settings", "export_options", "state", "ui"):
         merged = copy.deepcopy(base[key])
         merged.update(data.get(key) or {})
         data[key] = merged
     mocap = data["mocap"]
-    mocap.setdefault("calibration", None)
     mocap["options"] = {**default_mocap()["options"], **(mocap.get("options") or {})}
     mocap.setdefault("takes", {})
     _migrate_mocap(mocap)
@@ -211,6 +227,7 @@ def write_json_atomic(path: Path, data) -> None:
 class SessionStore:
     def __init__(self):
         self._locks: dict[str, threading.RLock] = {}
+        self._paths: dict[tuple[str, str], SessionPaths] = {}
         self._guard = threading.Lock()
 
     def lock(self, name: str) -> threading.RLock:
@@ -218,7 +235,12 @@ class SessionStore:
             return self._locks.setdefault(name, threading.RLock())
 
     def paths(self, name: str) -> SessionPaths:
-        return SessionPaths(name)
+        """The session's folders; built once per name (and sessions dir, which tests swap)."""
+        key = (str(config.sessions_dir()), name)
+        p = self._paths.get(key)
+        if p is None:
+            p = self._paths[key] = SessionPaths(name)
+        return p
 
     def exists(self, name: str) -> bool:
         return self.paths(name).root.is_dir()

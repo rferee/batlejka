@@ -21,6 +21,7 @@ from collections import deque
 from pathlib import Path
 
 from .. import config
+from ..app_state import jobs
 from ..ffmpeg_tools import Cancelled, kill_tree
 from ..session_store import write_json_atomic
 from . import runner
@@ -134,12 +135,7 @@ def ready() -> bool:
 
 
 def _setup_busy() -> bool:
-    try:
-        from ..app_state import jobs
-
-        return bool(jobs.active(None, "setup"))
-    except Exception:  # noqa: BLE001
-        return False
+    return bool(jobs.active(None, "setup"))
 
 
 def check(job=None) -> dict:

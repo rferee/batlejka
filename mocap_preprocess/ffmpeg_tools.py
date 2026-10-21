@@ -420,19 +420,18 @@ def scale_expr(long_side: int) -> str:
     return f"scale=w='if(gte(iw,ih),min({L},iw),-2)':h='if(gte(iw,ih),-2,min({L},ih))'"
 
 
+# A browser-friendly scrub video: fast H.264 with short GOPs (seeks land every 15 frames), mono AAC.
+PROXY_ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                "-g", "15", "-keyint_min", "15", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1", "-b:a", "96k"]
+PROXY_TAIL = ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]
+
+
 def proxy_args(src: Path, dst_tmp: Path, long_side: int, hwaccel: bool) -> list:
     args: list = ["ffmpeg", "-y", "-v", "error"]
     if hwaccel:
         args += ["-hwaccel", "cuda"]
-    args += [
-        "-i", src, "-map", "0:v:0", "-map", "0:a:0?",
-        "-vf", scale_expr(long_side),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-        "-g", "15", "-keyint_min", "15", "-sc_threshold", "0",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1", "-b:a", "96k",
-        "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", dst_tmp,
-    ]
-    return args
+    return args + ["-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale_expr(long_side)] + PROXY_ENCODE + PROXY_TAIL + [dst_tmp]
 
 
 def count_video_frames(path: Path) -> int | None:
@@ -442,12 +441,3 @@ def count_video_frames(path: Path) -> int | None:
         return None
     text = r.stdout.decode("utf-8", "replace").strip().split(",")[0].strip()
     return _int(text)
-
-
-def video_stream_info(path: Path) -> dict | None:
-    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=width,height,r_frame_rate,avg_frame_rate", "-of", "json", path], timeout=60)
-    if r.returncode != 0:
-        return None
-    streams = json.loads(r.stdout.decode("utf-8", "replace") or "{}").get("streams") or []
-    return streams[0] if streams else None

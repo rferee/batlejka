@@ -2,7 +2,7 @@
 fmc_headless.py - run FreeMoCap 1.8.2 calibration and motion capture with no GUI.
 
 This file runs INSIDE the FreeMoCap virtualenv (its own interpreter), never inside
-the mocap-preprocess app. It only uses the stdlib plus what FreeMoCap installs.
+the Batlejka app. It only uses the stdlib plus what FreeMoCap installs.
 
     <fmc-venv>/python -I fmc_headless.py [--fmc-home DIR] [--verbose] <command> ...
 
@@ -166,9 +166,10 @@ def list_videos(recording: Path) -> list:
     return videos
 
 
-def check_recording(recording: Path) -> list:
+def check_recording(recording: Path, sizes: dict | None = None) -> list:
     """Fail early on what the headless path doesn't check: unreadable files and
-    unequal frame counts. Returns camera names (file stems) in FreeMoCap's order."""
+    unequal frame counts. Returns camera names (file stems) in FreeMoCap's order; fills
+    ``sizes`` (camera -> (width, height)) when a dict is given."""
     import cv2
 
     videos = list_videos(recording)
@@ -178,6 +179,8 @@ def check_recording(recording: Path) -> list:
         if not cap.isOpened():
             raise RuntimeError(f"OpenCV can't open {v}")
         stats[v.stem] = (int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), round(cap.get(cv2.CAP_PROP_FPS), 3))
+        if sizes is not None:
+            sizes[v.stem] = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         cap.release()
     if len({s[0] for s in stats.values()}) > 1:
         raise ValueError(f"{recording.name}: frame counts differ between cameras: {stats}")
@@ -202,11 +205,34 @@ def camera_names(calib: dict) -> list:
     return [calib[k]["name"] for k in camera_keys(calib)]
 
 
-def prepare_take_calibration(take: Path, take_cams: list, toml_path: Path) -> tuple:
+def rescale_camera(cam: dict, video) -> tuple:
+    """The camera's calibration scaled to the video size ``(width, height)`` of this take
+    when that differs from the size it was calibrated at: focal length and principal point
+    follow the pixels, the distortion coefficients (normalised) stay. Returns
+    (camera, note) with note None when nothing changed (same size, or size unknown)."""
+    size = cam.get("size")
+    if not video or not size:
+        return cam, None
+    video = [int(video[0]), int(video[1])]
+    size = [int(size[0]), int(size[1])]
+    if video == size:
+        return cam, None
+    sx, sy = video[0] / size[0], video[1] / size[1]
+    m = cam["matrix"]
+    out = dict(cam)
+    out["size"] = video
+    out["matrix"] = [[m[0][0] * sx, m[0][1], m[0][2] * sx], [m[1][0], m[1][1] * sy, m[1][2] * sy], list(m[2])]
+    return out, {"camera": cam["name"], "calibrated": size, "video": video, "scale": [round(sx, 4), round(sy, 4)]}
+
+
+def prepare_take_calibration(take: Path, take_cams: list, toml_path: Path, sizes: dict | None = None) -> tuple:
     """1.8.2 pairs 2D data with calibration cameras purely by POSITION and never
     compares names, so a missing camera would silently triangulate garbage. Write a
     calibration into the take folder that contains exactly the take's cameras, in
-    the take's order. Returns (path, is_subset)."""
+    the take's order. ``sizes`` (camera -> (width, height) of its video here) lets a
+    camera that recorded this take at another resolution than it was calibrated at get
+    matching intrinsics (see rescale_camera); FreeMoCap would otherwise bend the skeleton
+    without a word. Returns (path, is_subset, adjustments)."""
     import toml
 
     calib = read_toml(toml_path)
@@ -223,12 +249,22 @@ def prepare_take_calibration(take: Path, take_cams: list, toml_path: Path) -> tu
     is_subset = len(take_cams) < len(by_name)
     dst = take / f"{take.name}_camera_calibration.toml"
     if dst.resolve() == toml_path.resolve():
-        return dst, False
-    if take_cams != camera_names(calib):
-        # a subset, or the same cameras in another order: renumber cam_0.. in the take's order
-        out = {f"cam_{i}": by_name[name] for i, name in enumerate(take_cams)}
+        return dst, False, []
+    cams, adjustments = {}, []
+    for name in take_cams:
+        cams[name], note = rescale_camera(by_name[name], (sizes or {}).get(name))
+        if note:
+            adjustments.append(note)
+    reordered = take_cams != camera_names(calib)
+    if reordered or adjustments:
+        # a subset, the same cameras in another order, or rescaled intrinsics: cam_0.. in the take's order
+        out = {f"cam_{i}": cams[name] for i, name in enumerate(take_cams)}
         meta = dict(calib.get("metadata", {}))
-        meta["subset_of" if is_subset else "reordered_from"] = str(toml_path)
+        if reordered:
+            meta["subset_of" if is_subset else "reordered_from"] = str(toml_path)
+        if adjustments:
+            meta["rescaled"] = {a["camera"]: f"{a['calibrated'][0]}x{a['calibrated'][1]} -> {a['video'][0]}x{a['video'][1]}"
+                                for a in adjustments}
         out["metadata"] = meta
         with open(dst, "w") as f:
             toml.dump(out, f)
@@ -237,10 +273,15 @@ def prepare_take_calibration(take: Path, take_cams: list, toml_path: Path) -> tu
             msg = f"{take.name}: using {len(take_cams)}/{len(by_name)} calibrated cameras (missing {missing})"
             say(f"[warn] {msg}")
             emit_event("warn", take=take.name, message=msg)
+        for a in adjustments:
+            msg = (f"{take.name}: {a['camera']} is {a['video'][0]}x{a['video'][1]} here but was calibrated at "
+                   f"{a['calibrated'][0]}x{a['calibrated'][1]}: its intrinsics are scaled x{a['scale'][0]:g}")
+            say(f"[warn] {msg}")
+            emit_event("warn", take=take.name, message=msg)
     else:
         # the full set in the calibration's order: an unchanged copy (provenance; FreeMoCap's GUI looks for it)
         shutil.copy2(toml_path, dst)
-    return dst, is_subset
+    return dst, is_subset, adjustments
 
 
 # --------------------------------------------------------------------------- calibrate
@@ -384,8 +425,9 @@ def process(take: Path, toml_path: Path, processes: int, run_blender: bool, blen
     )
 
     t0 = time.time()
-    take_cams = check_recording(take)
-    used_toml, is_subset = prepare_take_calibration(take, take_cams, toml_path)
+    sizes: dict = {}
+    take_cams = check_recording(take, sizes)
+    used_toml, is_subset, adjusted = prepare_take_calibration(take, take_cams, toml_path, sizes)
 
     params = build_processing_params(params_in, processes)
     STAGES.reset(take.name)
@@ -407,6 +449,7 @@ def process(take: Path, toml_path: Path, processes: int, run_blender: bool, blen
         "output_data": output,
         "cameras": take_cams,
         "subset": is_subset,
+        "adjusted": adjusted,
         "toml": used_toml,
         "blend": next(iter(take.glob("*.blend")), None),
         "seconds": round(time.time() - t0, 1),

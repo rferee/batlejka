@@ -1,19 +1,16 @@
 """/api/sessions/{s}/mocap...: FreeMoCap calibration profiles and processing of exported takes."""
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-
 from fastapi import APIRouter, Body, HTTPException
 
+from . import config
 from .app_state import jobs, require_session, store
 from .fmc import env, mocap
 from .routes_previews import after_mocap_job
 
 router = APIRouter()
 
-CALIBRATE, PROCESS = "mocap_calibrate", "mocap_process"
+CALIBRATE, PROCESS = mocap.JOB_CALIBRATE, mocap.JOB_PROCESS
 
 
 def _freemocap() -> dict:
@@ -40,10 +37,6 @@ def _described(name: str, take_id: str) -> dict:
         return mocap.find_take(store, name, str(take_id))[1]
     except mocap.MocapError as e:
         raise HTTPException(400, str(e))
-
-
-def _job_response(job) -> dict:
-    return job.info(log_since=0)
 
 
 def _view(name: str) -> dict:
@@ -84,33 +77,8 @@ def put_options(s: str, payload: dict = Body(...)):
 
 
 # ---------------------------------------------------------------------------
-# profiles
-
-@router.post("/api/sessions/{s}/mocap/profiles")
-def create_profile(s: str, payload: dict = Body(...)):
-    """{name, take_id?, board?, square_mm?, groundplane?} → a "draft" (not run) profile."""
-    name = require_session(s)
-    p = _edit(name, lambda paths, data: mocap.create_profile(paths, data, payload or {}))
-    return {"profile": p["id"], **_view(name)}
-
-
-@router.put("/api/sessions/{s}/mocap/profiles/{pid}")
-def update_profile(s: str, pid: str, payload: dict = Body(...)):
-    """{name?, take_id?, board?, square_mm?, groundplane?}. A calibrated profile keeps its
-    result (``settings_changed`` tells the UI it no longer matches) until it's recalibrated."""
-    name = require_session(s)
-    if _calibrating(name, pid):
-        raise HTTPException(409, "that profile is calibrating — wait for it or cancel it")
-    _edit(name, lambda paths, data: mocap.update_profile(paths, data, pid, payload or {}))
-    return _view(name)
-
-
-@router.post("/api/sessions/{s}/mocap/profiles/{pid}/duplicate")
-def duplicate_profile(s: str, pid: str):
-    name = require_session(s)
-    p = _edit(name, lambda paths, data: mocap.duplicate_profile(data, pid))
-    return {"profile": p["id"], **_view(name)}
-
+# profiles (made by the New profile form, POST .../mocap/calibrate; the Calibrate screen's
+# Duplicate copies a profile's settings into that form)
 
 @router.delete("/api/sessions/{s}/mocap/profiles/{pid}")
 def delete_profile(s: str, pid: str):
@@ -128,10 +96,9 @@ def activate_profile(s: str, pid: str):
     return _view(name)
 
 
-@router.post("/api/sessions/{s}/mocap/profiles/{pid}/calibrate")
-def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
-    """Run FreeMoCap's calibration for a profile → job (kind mocap_calibrate, job.live.profile)."""
-    name = require_session(s)
+def _start_calibration(name: str, pid: str, delete_leftovers: bool) -> dict:
+    """Check that profile ``pid`` can calibrate right now and start the job
+    (kind mocap_calibrate, job.live.profile); HTTPException otherwise."""
     _require_ready()
     data = store.load(name)
     p = mocap.get_profile(data, pid)
@@ -150,7 +117,7 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
         raise HTTPException(400, f"{take['name']}: videos missing on disk: {', '.join(take['missing'])} — re-export it")
     if len(take["cameras"]) < 2:
         raise HTTPException(400, f"{take['name']}: needs at least 2 cameras, has {len(take['cameras'])}")
-    if take["leftovers"] and not (payload or {}).get("delete_leftovers"):
+    if take["leftovers"] and not delete_leftovers:
         _leftover_conflict({take["take_id"]: take["leftovers"]}, "the calibration")
     if jobs.active(name, PROCESS):
         raise HTTPException(409, "mocap processing is running — wait for it or cancel it first")
@@ -167,9 +134,14 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
         finally:
             after_mocap_job(name, job)      # its board videos get previews for Cut Takes
 
-    job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}")
-    job.live = {"profile": pid}
-    return _job_response(job)
+    job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}", live={"profile": pid})
+    return job.info(log_since=0)
+
+
+@router.post("/api/sessions/{s}/mocap/profiles/{pid}/calibrate")
+def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
+    """Run FreeMoCap's calibration for a profile that isn't calibrated yet (failed, or never run)."""
+    return _start_calibration(require_session(s), pid, bool((payload or {}).get("delete_leftovers")))
 
 
 @router.post("/api/sessions/{s}/mocap/calibrate")
@@ -194,7 +166,7 @@ def calibrate(s: str, payload: dict = Body(...)):
 
     p = _edit(name, make)
     try:
-        return calibrate_profile(s, p["id"], {"delete_leftovers": payload.get("delete_leftovers")})
+        return _start_calibration(name, p["id"], bool(payload.get("delete_leftovers")))
     except HTTPException:
         _edit(name, lambda paths, data: mocap.delete_profile(paths, data, p["id"]))
         raise
@@ -230,11 +202,7 @@ def open_blend(s: str, tid: str):
         path = mocap.blend_path(store, name, str(tid))
     except mocap.MocapError as e:
         raise HTTPException(404, str(e))
-    if os.name == "nt":
-        os.startfile(str(path))  # noqa: S606 - local tool, path checked to be inside the take folder
-    else:
-        opener = "open" if sys.platform == "darwin" else "xdg-open"
-        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    config.open_in_os(path)          # blend_path checked it's inside the take folder
     return {"opened": str(path)}
 
 
@@ -257,16 +225,20 @@ def process(s: str, payload: dict = Body(...)):
         mocap.check_params(params)
     except mocap.MocapError as e:
         raise HTTPException(400, str(e))
+    described = mocap.described_takes(store, name)     # one pass over output/ for all of them
+    paths = store.paths(name)
     takes, problems, leftovers = [], [], {}
     for tid in dict.fromkeys(take_ids):
-        tk = _described(name, tid)
+        tk = described.get(tid)
+        if tk is None:
+            raise HTTPException(400, f"take {tid!r} hasn't been exported")
         prof = mocap.get_profile(data, tk["profile"]) if tk["profile"] else None
-        skipped = mocap.skipped_stage_missing(store.paths(name).output / tk["dir"], params)
+        skipped = mocap.skipped_stage_missing(paths.output / tk["dir"], params)
         if tk["is_calibration"]:
             problems.append(f"{tk['name']} is a calibration take")
         elif not mocap.calibrated(prof):
             problems.append(f"{tk['name']}: no calibrated profile — calibrate one on the Calibrate step")
-        elif not (store.paths(name).root / prof["toml"]).is_file():
+        elif not (paths.root / prof["toml"]).is_file():
             problems.append(f"{tk['name']}: {prof['name']}'s calibration file is gone ({prof['toml']}) — recalibrate it")
         elif not tk["layout_ok"]:
             problems.append(f"{tk['name']}: no synchronized_videos/ folder (flat layout?)")
@@ -298,4 +270,4 @@ def process(s: str, payload: dict = Body(...)):
         finally:
             after_mocap_job(name, job)      # the skeleton videos get previews for Cut Takes
 
-    return _job_response(jobs.start(PROCESS, name, run, label="Process mocap"))
+    return jobs.start(PROCESS, name, run, label="Process mocap").info(log_since=0)

@@ -4,7 +4,6 @@ migration of pre-profile sessions. No FreeMoCap needed."""
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import time
 from pathlib import Path
@@ -12,8 +11,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import wait_job
 from mocap_preprocess import config, routes_mocap, server
-from mocap_preprocess.app_state import jobs, store
+from mocap_preprocess.app_state import store
 from mocap_preprocess.fmc import env, mocap, runner
 
 ROOT = Path(__file__).resolve().parent / "_tmp" / "mocap_sessions"
@@ -46,6 +46,8 @@ class FakeRunner:
         self.crash_after = None  # stop reporting after this many takes
         self.ncal = 0            # calibrations run (written into each TOML, to tell them apart)
         self.params = None       # the last --params file's contents
+        self.fail_calibration = False
+        self.adjusted = []       # what the headless script reports as rescaled per take
 
     def __call__(self, cmd, args=(), job=None, on_event=None, on_tqdm=None, log_text=True):
         args = [str(a) for a in args]
@@ -55,6 +57,8 @@ class FakeRunner:
         if cmd == "calibrate":
             rec = Path(args[0])
             ev({"type": "stage", "scope": "calibration", "take": rec.name, "stage": "detecting_board"})
+            if self.fail_calibration:
+                return {"ok": False, "error": "board not found in any camera", "returncode": 2, "log": "fake.log"}
             for c in CAMS:
                 for n in (10, 50, 100):
                     bar({"name": f"{c}.mp4", "pct": n, "n": n, "total": 100})
@@ -90,7 +94,7 @@ class FakeRunner:
             (out / f"{d.name}_body_3d_xyz.npy").write_bytes(b"x")
             ev({"type": "take_done", "take": d.name, "path": str(d), "cameras": cams,
                 "subset": len(cams) < 3, "toml": str(d / f"{d.name}_camera_calibration.toml"), "seconds": 1.5,
-                "params": applied})
+                "params": applied, "adjusted": list(self.adjusted)})
         return {"ok": not failed, "failed": failed, "returncode": 0 if not failed else 1, "log": "fake.log"}
 
 
@@ -127,8 +131,7 @@ def fake(monkeypatch):
 
 
 def wait(client, job):
-    j = jobs.get(job["id"])
-    assert j.done_event.wait(10), "job didn't finish"
+    wait_job(job["id"], 10)
     return client.get(f"/api/jobs/{job['id']}?log_since=0&live=1").json()
 
 
@@ -140,17 +143,15 @@ def calibrate(client):
     return wait(client, r.json())
 
 
-def new_profile(client, name, **kw):
-    r = client.post(f"/api/sessions/{NAME}/mocap/profiles",
+def calibrate_named(client, name, status="done", **kw):
+    """The New profile form under a given name; returns the profile's id once the job ended."""
+    r = client.post(f"/api/sessions/{NAME}/mocap/calibrate",
                     json={"name": name, "take_id": "t1", "board": "7x5", "square_mm": 39, **kw})
     assert r.status_code == 200, r.text
-    return r.json()["profile"]
-
-
-def run_profile(client, pid):
-    r = client.post(f"/api/sessions/{NAME}/mocap/profiles/{pid}/calibrate", json={})
-    assert r.status_code == 200, r.text
-    return wait(client, r.json())
+    j = wait(client, r.json())
+    assert j["status"] == status, j
+    v = client.get(f"/api/sessions/{NAME}/mocap").json()
+    return next(p["id"] for p in v["profiles"] if p["name"] == name)
 
 
 def profile(view, pid):
@@ -166,7 +167,7 @@ def test_listing_before_calibration(fake):
     v = client.get(f"/api/sessions/{NAME}/mocap").json()
     assert v["freemocap"]["ready"] is True
     assert v["suggested_calibration_take"] == "t1"
-    assert v["calibration"] is None and v["profiles"] == [] and v["active_profile"] is None
+    assert v["profiles"] == [] and v["active_profile"] is None
     t = by_id(v)
     assert set(t) == {"t1", "t2", "t3", "t4"}
     assert t["t3"]["leftovers"] == ["D_synced.mp4"] and t["t3"]["missing"] == []
@@ -221,9 +222,7 @@ def test_calibrate_stores_calibration_and_matches_cameras(fake):
     assert p["reprojection_error_px"] == 0.42 and p["cameras"] == CAMS and p["square_mm"] == 39.0
     assert p["take_id"] == "t1" and p["freemocap"] == config.FMC_VERSION and p["created_at"]
     assert not p["settings_changed"] and p["used_by"] == 3      # every take but the calibration one
-    c = v["calibration"]                                         # the active profile's mirror
-    assert c["toml"] == p["toml"] and c["profile"] == p["id"]
-    assert store.load(NAME)["mocap"]["calibration"]["toml"] == p["toml"]
+    assert "calibration" not in store.load(NAME)["mocap"]        # no mirror of the active profile any more
     t = by_id(v)
     assert t["t1"]["is_calibration"]
     assert t["t2"]["calib_match"] == {"n": 2, "of": 3, "missing": ["C_synced"], "unknown": []}
@@ -339,63 +338,45 @@ def test_read_toml_cameras_sorted(tmp_path):
 
 # --------------------------------------------------------------------------- profiles
 
-def test_profile_crud(fake):
+def test_failed_calibration_stays_and_runs_again(fake):
+    """A calibration that fails leaves the profile (status failed) so it can be run again;
+    until it succeeds it can't be made active or picked for a take. The form is the one way
+    to make a profile: the old draft / edit / duplicate routes are gone."""
     client, fr, paths = fake
-    url = f"/api/sessions/{NAME}/mocap/profiles"
-    r = client.post(url, json={"name": "floor 5x3!", "board": "5x3", "groundplane": True})
+    url = f"/api/sessions/{NAME}/mocap"
+    fr.fail_calibration = True
+    r = client.post(f"{url}/calibrate", json={"name": "floor 5x3!", "take_id": "t1", "board": "5x3", "square_mm": 58, "groundplane": True})
     assert r.status_code == 200, r.text
-    pid = r.json()["profile"]
-    p = profile(r.json(), pid)
-    assert p["name"] == "floor-5x3" and p["status"] == "draft" and not p["calibrated"] and not p["active"]
-    assert p["take_id"] == "t1" and p["square_mm"] is None          # take defaults to the "calib…" one
-    assert client.post(url, json={"name": "floor-5x3"}).status_code == 400        # name taken
-    assert client.post(url, json={"name": "  "}).status_code == 400
-    assert client.post(f"{url}/{pid}/calibrate", json={}).status_code == 400       # no square size yet
-    assert client.post(f"{url}/{pid}/activate").status_code == 400                 # not calibrated
-    r = client.put(f"{url}/{pid}", json={"square_mm": 58, "board": "9x9"})
-    assert r.status_code == 400
-    r = client.put(f"{url}/{pid}", json={"square_mm": 58})
-    assert profile(r.json(), pid)["square_mm"] == 58.0
+    assert wait(client, r.json())["status"] == "error"
+    v = client.get(url).json()
+    p = v["profiles"][0]
+    pid = p["id"]
+    assert p["name"] == "floor-5x3" and p["status"] == "failed" and not p["calibrated"] and not p["active"]
+    assert "board not found" in (p["error"] or "") and v["active_profile"] is None
+    assert client.post(f"{url}/profiles/{pid}/activate").status_code == 400
+    assert client.put(f"{url}/takes/t2/profile", json={"profile": pid}).status_code == 400
+    assert client.post(f"{url}/profiles", json={"name": "x", "square_mm": 30}).status_code in (404, 405)
+    assert client.put(f"{url}/profiles/{pid}", json={"name": "y"}).status_code in (404, 405)
+    assert client.post(f"{url}/profiles/{pid}/duplicate").status_code in (404, 405)
 
-    j = run_profile(client, pid)
+    fr.fail_calibration = False
+    j = wait(client, client.post(f"{url}/profiles/{pid}/calibrate", json={}).json())
     assert j["status"] == "done", j
-    v = client.get(f"/api/sessions/{NAME}/mocap").json()
+    v = client.get(url).json()
     p = profile(v, pid)
-    assert p["status"] == "calibrated" and p["active"]               # the first calibrated profile becomes active
+    assert p["status"] == "calibrated" and p["active"] and p["error"] is None   # the first calibrated profile becomes active
     assert fr.calls[-1][1][1:] == ["--square-mm", "58", "--board", "5x3", "--groundplane"]
-
-    # a calibrated profile is locked: no new settings, no second run (duplicate it instead)
-    r = client.put(f"{url}/{pid}", json={"square_mm": 60, "name": "nope"})
-    assert r.status_code == 400 and "locked" in r.text
-    assert client.put(f"{url}/{pid}", json={"square_mm": "58", "board": "5x3"}).status_code == 200   # unchanged is fine
-    assert client.post(f"{url}/{pid}/calibrate", json={}).status_code == 409
-    assert (paths.output / "calibrations" / "floor-5x3.toml").is_file()       # the refused rename didn't move it
-    # rename moves its TOML
-    v = client.put(f"{url}/{pid}", json={"name": "floor"}).json()
-    assert profile(v, pid)["toml"] == "output/calibrations/floor.toml"
-    assert (paths.output / "calibrations" / "floor.toml").is_file()
-    assert not (paths.output / "calibrations" / "floor-5x3.toml").exists()
-    # duplicate → draft copy
-    r = client.post(f"{url}/{pid}/duplicate")
-    dup = r.json()["profile"]
-    d = profile(r.json(), dup)
-    assert d["name"] == "floor-copy" and d["status"] == "draft" and d["square_mm"] == 58.0 and d["board"] == "5x3"
-    # the active one can't be deleted; another can
-    assert client.delete(f"{url}/{pid}").status_code == 400
-    assert client.put(f"{url}/{dup}", json={"square_mm": 60}).status_code == 200   # the copy is a draft
-    v = client.delete(f"{url}/{dup}").json()
-    assert [x["id"] for x in v["profiles"]] == [pid]
-    # calibration takes aren't listed for processing
-    assert by_id(v)["t1"]["is_calibration"]
+    assert (paths.output / "calibrations" / "floor-5x3.toml").is_file()
+    assert client.post(f"{url}/profiles/{pid}/calibrate", json={}).status_code == 409   # calibrated: duplicate it instead
+    assert client.delete(f"{url}/profiles/{pid}").status_code == 400                     # the active one stays
+    assert by_id(v)["t1"]["is_calibration"]                                              # its take isn't listed for processing
 
 
 def test_takes_use_their_own_profile(fake):
     client, fr, paths = fake
     (paths.output / "walk" / "synchronized_videos" / "D_synced.mp4").unlink()
-    a = new_profile(client, "a")
-    b = new_profile(client, "b", square_mm=40)
-    run_profile(client, a)
-    run_profile(client, b)
+    a = calibrate_named(client, "a")
+    b = calibrate_named(client, "b", square_mm=40)
     url = f"/api/sessions/{NAME}/mocap"
     v = client.get(url).json()
     assert v["active_profile"] == a and by_id(v)["t2"]["profile"] == a and not by_id(v)["t2"]["profile_explicit"]
@@ -411,14 +392,17 @@ def test_takes_use_their_own_profile(fake):
     assert tomls == {"jump": "b.toml", "walk": "a.toml"}           # one FreeMoCap run per profile
     info = json.loads((paths.output / "jump" / "mocap_info.json").read_text())
     assert info["calibration"]["profile"] == b and info["calibration"]["profile_name"] == "b"
-    assert store.load(NAME)["mocap"]["takes"]["t2"] == {**store.load(NAME)["mocap"]["takes"]["t2"], "profile": b, "status": "done"}
+    rec = store.load(NAME)["mocap"]["takes"]["t2"]
+    assert rec["profile"] == b and rec["status"] == "done"
 
     # picking another calibration makes the take stale; back to the active one → follows it
     v = client.put(f"{url}/takes/t2/profile", json={"profile": None}).json()
     t = by_id(v)["t2"]
     assert t["profile"] == a and t["status"] == "stale" and t["stale_reason"] == "other calibration selected"
-    # a draft can't be picked; deleting a picked profile falls back to the active one
-    c = new_profile(client, "c")
+    # a profile that isn't calibrated can't be picked; deleting a picked profile falls back to the active one
+    fr.fail_calibration = True
+    c = calibrate_named(client, "c", status="error")
+    fr.fail_calibration = False
     assert client.put(f"{url}/takes/t2/profile", json={"profile": c}).status_code == 400
     client.put(f"{url}/takes/t2/profile", json={"profile": b})
     v = client.delete(f"{url}/profiles/{b}").json()
@@ -454,8 +438,7 @@ def test_legacy_calibration_migrates(fake):
     assert by_id(v)["t2"]["calib_match"]["n"] == 2
 
     # a new profile on the same take: FreeMoCap overwrites the take's TOML, so p1 gets its own copy first
-    q = new_profile(client, "second")
-    run_profile(client, q)
+    calibrate_named(client, "second")
     v = client.get(f"/api/sessions/{NAME}/mocap").json()
     p1 = profile(v, "p1")
     assert p1["toml"] == "output/calibrations/5x3-58mm.toml"
@@ -469,14 +452,19 @@ def test_take_detail_and_blend(fake):
 
     client, fr, paths = fake
     calibrate(client)
+    fr.adjusted = [{"camera": "B_synced", "calibrated": [2160, 3840], "video": [1080, 1920], "scale": [0.5, 0.5]}]
     j = wait(client, client.post(f"/api/sessions/{NAME}/mocap/process", json={"take_ids": ["t2"]}).json())
     assert j["status"] == "done", j
+    info = json.loads((paths.output / "jump" / "mocap_info.json").read_text())
+    assert info["calibration_adjustments"] == fr.adjusted         # kept with the run, shown in Details
+    fr.adjusted = []
     body = np.zeros((10, 33, 3))
     body[:, 13] = [300.0, 0.0, 0.0]          # left elbow 300 mm from the left shoulder (at the origin)
     body[:, 25] = [0.0, 400.0, 0.0]          # left knee 400 mm from the left hip
     body[3, 0] = np.nan                      # one frame without the whole body
     np.save(paths.output / "jump" / "output_data" / "jump_body_3d_xyz.npy", body)
     d = client.get(f"/api/sessions/{NAME}/mocap/takes/t2/detail").json()
+    assert d["info"]["calibration_adjustments"][0]["camera"] == "B_synced"
     q = d["quality"]
     assert q["frames"] == 10 and q["body_tracked_pct"] == 90.0
     assert q["upper_arm_mm"][0] == 300.0 and q["thigh_mm"][0] == 400.0

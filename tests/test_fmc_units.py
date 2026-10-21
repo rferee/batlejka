@@ -11,7 +11,10 @@ import pytest
 from mocap_preprocess import config
 from mocap_preprocess.fmc import runner
 
-toml = pytest.importorskip("toml")
+try:
+    import toml                      # only the subset-TOML tests below need it (requirements-dev.txt)
+except ImportError:                  # pragma: no cover
+    toml = None
 
 
 def test_parse_events_and_result():
@@ -89,6 +92,8 @@ def _cam(name, k):
 
 @pytest.fixture
 def calib(tmp_path):
+    if toml is None:
+        pytest.skip("needs the toml package")
     data = {f"cam_{i}": _cam(n, i) for i, n in enumerate(["a_synced", "b_synced", "c_synced", "d_synced"])}
     data["metadata"] = {"adjusted": False, "error": 0.26}
     path = tmp_path / "calibration_camera_calibration.toml"
@@ -106,8 +111,8 @@ def _take(tmp_path, name):
 def test_subset_calibration_renumbers_in_take_order(tmp_path, calib, capsys):
     fmc = _headless()
     take = _take(tmp_path, "take_1")
-    path, subset = fmc.prepare_take_calibration(take, ["a_synced", "c_synced", "d_synced"], calib)
-    assert subset is True
+    path, subset, adjusted = fmc.prepare_take_calibration(take, ["a_synced", "c_synced", "d_synced"], calib)
+    assert subset is True and adjusted == []
     assert path == take / "take_1_camera_calibration.toml"
     out = toml.load(str(path))
     keys = [k for k in sorted(out) if k != "metadata"]
@@ -124,9 +129,37 @@ def test_subset_calibration_renumbers_in_take_order(tmp_path, calib, capsys):
 def test_full_set_is_copied_unchanged(tmp_path, calib):
     fmc = _headless()
     take = _take(tmp_path, "take_2")
-    path, subset = fmc.prepare_take_calibration(take, ["a_synced", "b_synced", "c_synced", "d_synced"], calib)
-    assert subset is False
+    sizes = {n: (1920, 1080) for n in ("a_synced", "b_synced", "c_synced", "d_synced")}
+    path, subset, adjusted = fmc.prepare_take_calibration(take, list(sizes), calib, sizes)
+    assert subset is False and adjusted == []
     assert path.read_bytes() == calib.read_bytes()
+
+
+def test_intrinsics_follow_a_cameras_video_size(tmp_path, calib):
+    """A camera calibrated at one resolution but recorded at another (a phone switched from
+    4K to 1080p mid-session): its focal length and principal point are scaled to the take's
+    video size, distortions stay, and the change is reported."""
+    fmc = _headless()
+    take = _take(tmp_path, "take_4")
+    cams = ["a_synced", "b_synced", "c_synced", "d_synced"]
+    sizes = {"a_synced": (960, 540), "b_synced": (1920, 1080), "c_synced": (1920, 1080), "d_synced": (1920, 1080)}
+    path, subset, adjusted = fmc.prepare_take_calibration(take, cams, calib, sizes)
+    assert subset is False
+    assert adjusted == [{"camera": "a_synced", "calibrated": [1920, 1080], "video": [960, 540], "scale": [0.5, 0.5]}]
+    out = toml.load(str(path))
+    src = toml.load(str(calib))
+    a, a0 = out["cam_0"], src["cam_0"]
+    assert a["size"] == [960, 540]
+    assert a["matrix"] == [[500.0, 0.0, 480.0], [0.0, 500.0, 270.0], [0.0, 0.0, 1.0]]
+    assert a["distortions"] == a0["distortions"] and a["rotation"] == a0["rotation"] and a["translation"] == a0["translation"]
+    assert out["cam_1"] == src["cam_1"]                       # the others are untouched
+    assert out["metadata"]["rescaled"] == {"a_synced": "1920x1080 -> 960x540"}
+    # a subset with a rescaled camera: both apply
+    take = _take(tmp_path, "take_5")
+    path, subset, adjusted = fmc.prepare_take_calibration(take, ["c_synced", "a_synced"], calib, sizes)
+    assert subset is True and [x["camera"] for x in adjusted] == ["a_synced"]
+    out = toml.load(str(path))
+    assert out["cam_0"] == src["cam_2"] and out["cam_1"]["size"] == [960, 540]
 
 
 def test_unknown_camera_or_too_few_fail(tmp_path, calib):

@@ -37,11 +37,25 @@ def synthetic():
 
 
 @pytest.fixture(scope="session")
-def store(synthetic):
+def store():
+    """A store on tests/_tmp/sessions. Needs ffmpeg only, not the external clips: the scn_*
+    scenarios are generated from scratch, so they run on any machine with ffmpeg."""
     from mocap_preprocess.session_store import SessionStore
 
+    if not _have_tools():
+        pytest.skip("ffmpeg/ffprobe not on PATH")
     config.set_sessions_dir(SESSIONS)
     return SessionStore()
+
+
+def wait_job(job_id: str, timeout: float = 60):
+    """Block until the app's job ``job_id`` has ended; returns the Job."""
+    from mocap_preprocess.app_state import jobs
+
+    job = jobs.get(job_id)
+    assert job is not None, f"no job {job_id}"
+    assert job.done_event.wait(timeout), f"{job.label} didn't finish in {timeout} s"
+    return job
 
 
 @pytest.fixture(scope="session")

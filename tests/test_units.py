@@ -79,6 +79,40 @@ def test_sanitize_filename():
     assert sanitize_filename("  ...  ", "fallback") == "fallback"
 
 
+def test_source_file_stays_inside_source(tmp_path):
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionPaths
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path)
+        p = SessionPaths("s")
+        assert p.source_file("sub/clip.mov") == (tmp_path / "s" / "source" / "sub" / "clip.mov").resolve()
+        for bad in ("../session.json", "../../other/x.mov", "sub/../../x.mov"):
+            with pytest.raises(InvalidName):
+                p.source_file(bad)
+    finally:
+        config.set_sessions_dir(prev)
+
+
+@pytest.mark.parametrize("given,expected", [
+    ({"layout": "x", "encoder": "av1", "nvenc_preset": "p9"}, {"layout": "freemocap", "encoder": "libx264", "nvenc_preset": "p5"}),
+    ({"crf": "x"}, {"crf": 17}), ({"crf": 99}, {"crf": 51}), ({"crf": -3}, {"crf": 0}),
+    ({"long_side": "keep"}, {"long_side": 0}), ({"long_side": "0"}, {"long_side": 0}), ({"long_side": None}, {"long_side": 0}),
+    ({"long_side": "1280"}, {"long_side": 1280}),
+    ({"parallel": "x"}, {"parallel": 1}), ({"parallel": 0}, {"parallel": 1}), ({"parallel": 9}, {"parallel": 3}),
+    ({"audio": 0, "overwrite": ""}, {"audio": False, "overwrite": False}),
+    ({"camera_ids": "c1"}, {}), ({"camera_ids": ["c1"]}, {"camera_ids": ["c1"]}),
+])
+def test_export_options_fall_back_to_defaults(given, expected):
+    from mocap_preprocess import config, exporter
+    o = exporter.normalize_options(given, config.DEFAULT_EXPORT_OPTIONS)
+    for k, v in expected.items():
+        assert o[k] == v, k
+    if "camera_ids" not in expected:
+        assert "camera_ids" not in o
+    assert set(config.DEFAULT_EXPORT_OPTIONS) <= set(o)
+
+
 # ------------------------------------------------------------------ correlation
 
 def _room(n, rng):
@@ -178,6 +212,29 @@ def test_grouping_splits_identical_devices_by_overlap_and_background():
     assert assign["a1"] == assign["a2"] != assign["b1"] == assign["b2"]
     assert [c["name"] for c in cams] == ["cam1", "cam2", "cam3"]  # ordered by earliest clip (fuji first)
     assert assign["fuji"] == cams[0]["id"]
+
+
+def test_assign_new_keeps_assignments_and_places_new_files():
+    """Footage added later: a clip joins the camera whose background it matches (and whose
+    clips it doesn't overlap), a subfolder clip joins the camera of that name, anything else
+    gets a camera of its own; files already on a camera are left alone."""
+    rng = np.random.default_rng(7)
+    view_a, view_b, view_c = (rng.standard_normal((32, 32)) for _ in range(3))
+    data = {"cameras": [{"id": "c1", "name": "cam1", "rotation": 0, "include": True},
+                        {"id": "c2", "name": "cam2", "rotation": 0, "include": True},
+                        {"id": "c3", "name": "fuji", "rotation": 0, "include": True}],
+            "files": [_file("a1", "IMG_1.MOV", 0, 10, cam="c1"), _file("b1", "IMG_2.MOV", 0, 10, cam="c2"),
+                      _file("f1", "fuji/A.MOV", 0, 10, make="FUJIFILM", model="X-T4", w=1920, h=1080, cam="c3"),
+                      _file("a2", "IMG_3.MOV", 40, 10), _file("f2", "fuji/B.MOV", 40, 10, make="FUJIFILM", model="X-T4", w=1920, h=1080),
+                      _file("x1", "IMG_4.MOV", 1, 10)]}       # overlaps a1 and b1: can't be either phone
+    feats = {"a1": view_a, "b1": view_b, "a2": view_a + 0.1 * rng.standard_normal((32, 32)),
+             "x1": view_c, "f1": None, "f2": None}
+    done = grouping.assign_new(data, data["files"], lambda f: feats.get(f["id"]))
+    by = {f["id"]: f["camera"] for f in data["files"]}
+    assert sorted(done) == ["a2", "f2", "x1"]
+    assert by["a1"] == "c1" and by["b1"] == "c2" and by["f1"] == "c3"
+    assert by["a2"] == "c1" and by["f2"] == "c3"
+    assert by["x1"] not in ("c1", "c2", "c3") and [c["name"] for c in data["cameras"]][-1] == "cam3"
 
 
 def test_grouping_subfolders_win():

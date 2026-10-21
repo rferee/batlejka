@@ -9,8 +9,13 @@ error caught.
 """
 from __future__ import annotations
 
+import inspect
 import socket
 import sys
+from asyncio import base_events
+
+# asyncio.Server._detach() took no argument until 3.13, the transport from then on
+_DETACH_TAKES_TRANSPORT = len(inspect.signature(base_events.Server._detach).parameters) > 1
 
 
 def _call_connection_lost(self, exc):
@@ -28,7 +33,10 @@ def _call_connection_lost(self, exc):
         self._sock = None
         server = self._server
         if server is not None:
-            server._detach(self)
+            if _DETACH_TAKES_TRANSPORT:
+                server._detach(self)
+            else:
+                server._detach()
             self._server = None
         self._called_connection_lost = True
 

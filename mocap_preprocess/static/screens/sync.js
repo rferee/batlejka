@@ -1,9 +1,9 @@
 // Sync screen.
 import { SyncViz, snapshotFromSession, replayFrames } from '../syncviz.js';
 import {
-  GET, METHOD_COLORS, S, activeJob, api, basename, cameraById, cancelJob,
-  fmtOffset, h, icon, isActive, jobLogs, lastJob, onJobs,
-  pad2, pollSoon, render, startJob, tip, videoFiles,
+  GET, METHOD_COLORS, S, activeJob, basename, cameraById, cancelJob,
+  fmtOffset, h, icon, isActive, jobLogs, lastJob,
+  pad2, pollSoon, startJob, tip, videoFiles,
   METHOD_LABEL,
 } from '../app.js';
 
@@ -59,6 +59,10 @@ export const SyncScreen = {
     this.stopReplay();
     if (this.viz) this.viz.destroy();
     this.viz = null;
+  },
+  sessionChanged() {
+    this.stopReplay();
+    Object.assign(this, { resyncManual: false, offsetsOpen: {}, lastLive: null, replayPhase: null, shown: false });
   },
   update() { this.render(); },
   async onJobs() {

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -77,14 +78,25 @@ def sessions_dir() -> Path:
     return _sessions_dir
 
 
+_tools_found: dict[tuple[str, str | None], str] = {}
+
+
 def _find_tool(name: str, env_var: str) -> str | None:
+    """Where ``name`` is (the env var's path or program wins). A hit is remembered as long as
+    the file is still there, so the thousands of ffmpeg/ffprobe runs of a session don't each
+    walk PATH; a miss is looked up again every time, so installing ffmpeg needs no restart."""
     override = os.environ.get(env_var)
-    if override:
-        if Path(override).is_file():
-            return str(Path(override))
-        found = shutil.which(override)
+    key = (name, override)
+    found = _tools_found.get(key)
+    if found and Path(found).is_file():
         return found
-    return shutil.which(name)
+    if override:
+        found = str(Path(override)) if Path(override).is_file() else shutil.which(override)
+    else:
+        found = shutil.which(name)
+    if found:
+        _tools_found[key] = found
+    return found
 
 
 def ffmpeg_path() -> str | None:
@@ -93,3 +105,12 @@ def ffmpeg_path() -> str | None:
 
 def ffprobe_path() -> str | None:
     return _find_tool("ffprobe", "MOCAP_FFPROBE")
+
+
+def open_in_os(path: Path) -> None:
+    """Show a folder, or open a file with the program the OS associates with it."""
+    if os.name == "nt":
+        os.startfile(str(path))  # noqa: S606 - local tool; callers check the path is theirs
+    else:
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

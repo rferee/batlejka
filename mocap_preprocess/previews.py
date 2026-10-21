@@ -127,10 +127,7 @@ def build(store, name: str, job, busy_takes=frozenset()) -> dict:
             args += ["-i", c["synced"], "-map", "0:v:0", "-map", "1:a:0?"]
         else:
             args += ["-map", "0:v:0"]
-        args += ["-vf", ff.scale_expr(L), "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                 "-g", "15", "-keyint_min", "15", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
-                 "-c:a", "aac", "-ac", "1", "-b:a", "96k", "-shortest",
-                 "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", tmp]
+        args += ["-vf", ff.scale_expr(L)] + ff.PROXY_ENCODE + ["-shortest"] + ff.PROXY_TAIL + [tmp]
         before = _stat(c["src"])
         try:
             rc, err = ff.run_progress(args, dur, lambda x, i=i: job.set_progress((i + x) / len(todo), label),

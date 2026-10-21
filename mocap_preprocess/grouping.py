@@ -216,3 +216,4 @@ def regroup(data: dict, files: list[dict], load_feature: FeatureLoader) -> None:
     data["cameras"] = cameras
     for f in data["files"]:
         f["camera"] = assignment.get(f["id"])
+        f.pop("moved_from", None)       # the user's moves are replaced along with the grouping

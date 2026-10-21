@@ -20,9 +20,9 @@ _lock = threading.Lock()
 
 def _busy_takes(name: str) -> set[str]:
     """Takes FreeMoCap may still be writing: being processed, or being calibrated."""
-    busy = set(mocap.running_takes(jobs.active(name, "mocap_process")))
+    busy = set(mocap.running_takes(jobs.active(name, mocap.JOB_PROCESS)))
     data = None
-    for j in jobs.active(name, "mocap_calibrate"):
+    for j in jobs.active(name, mocap.JOB_CALIBRATE):
         pid = (getattr(j, "live", None) or {}).get("profile")
         data = data or store.load(name)
         p = mocap.get_profile(data, pid) if pid else None

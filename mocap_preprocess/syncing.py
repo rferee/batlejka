@@ -38,6 +38,7 @@ from scipy import signal
 
 from . import ffmpeg_tools as ff
 from .jobs import Job
+from .session_store import video_files
 from .session_store import SessionStore, now
 
 PRE_EMPHASIS = 0.97
@@ -291,10 +292,6 @@ def _overlap_groups(ids: list[str], iv: dict[str, tuple[float, float]]) -> list[
 
 # ---------------------------------------------------------------------------
 # helpers on session data
-
-def video_files(data: dict) -> list[dict]:
-    return [f for f in data["files"] if f.get("probe") and f["probe"].get("video")]
-
 
 def duration(f: dict) -> float:
     return float(f["probe"].get("duration") or 0.0)

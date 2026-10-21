@@ -2,7 +2,7 @@
 import { gpuCap } from '../setup.js';
 import {
   PUT, S, activeJob, applySession, basename, cameraById, fileById, fmtDate,
-  fmtDur, fpsFloat, fpsLabel, h, icon, onJobs, render,
+  fmtDur, fpsFloat, fpsLabel, h, icon, render,
   sUrl, startJob, tip, toast, videoFiles,
 } from '../app.js';
 

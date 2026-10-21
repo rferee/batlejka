@@ -12,7 +12,7 @@ if errorlevel 1 (
     py -3 -m venv .venv
 )
 if not exist ".venv\Scripts\python.exe" (
-    echo Could not create .venv - is Python 3.10+ installed?
+    echo Could not create .venv - is Python 3.12+ installed?
     pause
     exit /b 1
 )
@@ -27,6 +27,6 @@ if errorlevel 1 (
 )
 
 rem Extra arguments are passed through, e.g.  run.bat --port 9000 --no-browser
-echo Starting mocap-preprocess ...
+echo Starting Batlejka ...
 ".venv\Scripts\python.exe" -m mocap_preprocess %*
 if errorlevel 1 pause

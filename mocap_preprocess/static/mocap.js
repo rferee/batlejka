@@ -3,9 +3,9 @@
 // app.js imports this module, so app.js bindings are only used inside functions (circular import).
 import {
   h, icon, tip, S, GET, POST, PUT, sUrl, toast, confirmModal, activeJob, lastJob, cancelJob,
-  go, fmtDate, fmtDur, fmtBytes, prefs, render, pollSoon,
+  go, fmtDate, fmtDur, fmtBytes, prefs, putUi, render, pollSoon,
 } from './app.js';
-import * as setup from './setup.js';
+import { showSetup } from './setup.js';
 
 export const COLORS = { green: '#97d47d', orange: '#E89768', red: '#E56767', blue: '#8880F0', grey: '#4f4f4f' };
 const STAGES = {
@@ -102,11 +102,6 @@ export function profileStatus(p, job) {
   return { text: 'not run', color: COLORS.blue };
 }
 
-export function openSetup() {
-  if (typeof setup.showSetup === 'function') setup.showSetup();
-  else go('session');
-}
-
 export function notReadyCard(fm) {
   const broken = fm.state === 'broken';
   return h('div', { class: 'card mc-setup' },
@@ -118,7 +113,7 @@ export function notReadyCard(fm) {
         ? `It's installed but its check fails${fm.detail ? `: ${fm.detail}` : ''}. Repair it from the Setup panel.`
         : 'FreeMoCap runs in its own environment (Python 3.12, ~3 GB download), separate from this app. '
           + 'Install it from the Setup panel on the Home screen, then come back here.'),
-    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: openSetup }, icon('screwdriver-wrench'), 'Open Setup')));
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => showSetup() }, icon('screwdriver-wrench'), 'Open Setup')));
 }
 
 /** POST a mocap job; when the server refuses because of leftover videos (409), list them,
@@ -171,7 +166,10 @@ export const MocapScreen = {
     this.saveOpts();
     this.stopLive();
     this.closeViewer();
-    Object.assign(this, { data: null, name: null, sel: new Set(), opts: null, live: null, error: null, more: false, openTake: null, details: {} });
+    Object.assign(this, {
+      data: null, name: null, sel: new Set(), selFor: null, opts: null, live: null, error: null, more: false,
+      openTake: null, details: {}, detailReq: {},     // detailReq too, or the next session's takes never fetch theirs
+    });
   },
   update() { this.load(); },
   onJobs() { this.tick(); },
@@ -206,9 +204,13 @@ export const MocapScreen = {
   adopt(d, name) {
     if (this.name !== name) {
       this.name = name;
-      this.sel = new Set(prefs.get(`mocapSel.${name}`, []));
       this.optsDirty = false;
       this.more = false;
+      this.selFor = null;
+    }
+    if (this.selFor !== name && S.data) {      // the ticks are kept on the server, per session
+      this.sel = new Set(S.data.ui?.mocap_selected || []);
+      this.selFor = name;
     }
     this.data = d;
     if (!this.optsDirty) this.opts = { ...(d.options || {}), params: { ...(d.options?.params || {}) } };
@@ -221,7 +223,7 @@ export const MocapScreen = {
   selected() { return this.rows().filter((t) => this.sel.has(t.take_id) && this.selectable(t)); },
   setSel(ids, on) {
     for (const id of ids) { if (on) this.sel.add(id); else this.sel.delete(id); }
-    prefs.set(`mocapSel.${this.name}`, [...this.sel]);
+    putUi({ mocap_selected: [...this.sel] });
     this.render();
   },
 
@@ -246,19 +248,26 @@ export const MocapScreen = {
     this.optsTimer = setTimeout(() => this.saveOpts(), 500);
     if (rerender) this.render();
   },
-  async saveOpts() {
+  /** Save the settings now; ``beacon`` sends them without waiting (the page is going away). */
+  async saveOpts(beacon = false) {
     clearTimeout(this.optsTimer);
     if (!this.optsDirty || !this.name) return;
     this.optsDirty = false;
     const name = this.name;
+    const url = `/api/sessions/${encodeURIComponent(name)}/mocap/options`;
+    if (beacon) {
+      fetch(url, { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.opts) }).catch(() => {});
+      return;
+    }
     try {
-      const d = await PUT(`/api/sessions/${encodeURIComponent(name)}/mocap/options`, this.opts);
+      const d = await PUT(url, this.opts);
       if (this.data && this.name === name) {
         Object.assign(this.data, { options: d.options, params: d.params });
         this.load();                          // takes go stale (or fresh again) with the settings
       }
     } catch (e) { toast(`Couldn't save mocap options: ${e.message}`, 'error'); }
   },
+  flush() { this.saveOpts(true); },
   async openFolder(dir) {
     try { await POST(sUrl('/reveal'), { what: 'output', sub: dir }); } catch (e) { toast(e.message, 'error'); }
   },
@@ -695,6 +704,15 @@ export const MocapScreen = {
     } else if (done && q?.error) row('details', h('span', { class: 'warn' }, q.error));
     const usedProf = info?.calibration?.profile_name || this.profile(t.profile)?.name;
     if (usedProf) row('calibration', usedProf + (done && info?.calibration?.profile_name && info.calibration.profile !== t.profile ? ' (another profile is selected now)' : ''));
+    if (done && info) {
+      const adj = info.calibration_adjustments || [];
+      const scale = (s) => (Math.abs(s[0] - s[1]) < 1e-3 ? `×${+s[0].toFixed(3)}` : `×${+s[0].toFixed(3)} / ×${+s[1].toFixed(3)}`);
+      row('calibration adjustment', adj.length
+        ? h('div', { class: 'col', style: { gap: '2px' } }, adj.map((a) => h('span', null,
+          `${camName(a.camera)}: calibrated at ${a.calibrated[0]}×${a.calibrated[1]}, this take is ${a.video[0]}×${a.video[1]} · lens parameters scaled ${scale(a.scale)}`)))
+        : 'none',
+        'Cameras whose videos in this take have another size than they were calibrated at: their focal length and image centre were scaled to the take\'s resolution before triangulating. A camera that switched from 4K to 1080p mid-session would otherwise give a broken skeleton.');
+    }
     if (done && info?.params) row('settings', this.paramsText(info.params), 'FreeMoCap settings this take was processed with, where they differ from the current defaults.');
     row('frames', `${t.frames ?? '—'} · ${fmtDur(t.duration)}`);
     const camChips = done && q?.camera_detected
@@ -833,3 +851,4 @@ export const MocapScreen = {
     h('div', { class: 'mc-bar' }, h('div', { style: { width: `${rows.length ? (done.length / rows.length) * 100 : 0}%` } })));
   },
 };
+window.addEventListener('pagehide', () => MocapScreen.flush());   // a settings change made just before closing the tab

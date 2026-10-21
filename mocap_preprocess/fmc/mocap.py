@@ -11,8 +11,7 @@ Lists the exported takes (``output/<dir>/take_info.json``), matches their camera
 their profile, works out whether a take's mocap is up to date (``mocap_info.json``
 snapshot of the synchronized videos and the profile's calibration), and runs the
 calibrate / process jobs through :mod:`.runner`. The session lock is only held for short
-writes, never while FreeMoCap runs. ``mocap.calibration`` mirrors the active profile's
-result for older readers.
+writes, never while FreeMoCap runs.
 """
 from __future__ import annotations
 
@@ -24,14 +23,17 @@ import time
 import tomllib
 from pathlib import Path
 
+import numpy as np
+
 from .. import config
-from ..ffmpeg_tools import Cancelled
+from ..ffmpeg_tools import Cancelled, fps_float
 from ..session_store import sanitize_filename, write_json_atomic
 from . import runner
 
 VIDEO_DIR = "synchronized_videos"
 MOCAP_INFO = "mocap_info.json"
 CALIB_DIR = "calibrations"          # output/calibrations/<profile name>.toml
+JOB_CALIBRATE, JOB_PROCESS = "mocap_calibrate", "mocap_process"     # the two job kinds this module runs
 BOARDS = ("7x5", "5x3")
 SETTINGS = ("take_id", "board", "square_mm", "groundplane")
 # how far into a take each FreeMoCap stage is (2D tracking fills 0 → 0.75 from the tqdm bars)
@@ -190,46 +192,25 @@ def _settings(p: dict) -> dict:
     return {k: p.get(k) for k in SETTINGS}
 
 
-def sync_mirror(data: dict) -> None:
-    """``mocap.calibration`` = the active profile's result (older readers, the step's ✓)."""
-    p = active_profile(data)
-    data["mocap"]["calibration"] = None if not calibrated(p) else {
-        "take_id": p.get("take_id"), "toml": p.get("toml"), "board": p.get("board"),
-        "square_mm": p.get("square_mm"), "groundplane": p.get("groundplane"),
-        "groundplane_result": p.get("groundplane_result"), "reprojection_error_px": p.get("reprojection_error_px"),
-        "cameras": p.get("cameras") or [], "created_at": p.get("created_at"), "freemocap": p.get("freemocap"),
-        "profile": p.get("id"), "profile_name": p.get("name"),
-    }
-
-
-def _check_settings(paths, data: dict, patch: dict, partial: bool) -> dict:
-    out = {}
-    if "board" in patch or not partial:
-        board = str(patch.get("board") or "7x5")
-        if board not in BOARDS:
-            raise MocapError(f"board must be one of {', '.join(BOARDS)}")
-        out["board"] = board
-    if "square_mm" in patch or not partial:
-        v = patch.get("square_mm")
-        if v in (None, ""):
-            out["square_mm"] = None
-        else:
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                raise MocapError("square size must be a number of mm")
-            if not (f > 0 and f < 10000):
-                raise MocapError("square size (mm) must be > 0")
-            out["square_mm"] = round(f, 3)
-    if "groundplane" in patch or not partial:
-        out["groundplane"] = bool(patch.get("groundplane", False))
-    if "take_id" in patch or not partial:
-        tid = patch.get("take_id")
-        ids = {e["info"]["id"] for e in exported_takes(paths, data)}
-        if tid not in ids:
-            raise MocapError(f"take {tid!r} hasn't been exported")
-        out["take_id"] = tid
-    return out
+def _check_settings(paths, data: dict, patch: dict) -> dict:
+    board = str(patch.get("board") or "7x5")
+    if board not in BOARDS:
+        raise MocapError(f"board must be one of {', '.join(BOARDS)}")
+    v = patch.get("square_mm")
+    if v in (None, ""):
+        square = None
+    else:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise MocapError("square size must be a number of mm")
+        if not (f > 0 and f < 10000):
+            raise MocapError("square size (mm) must be > 0")
+        square = round(f, 3)
+    tid = patch.get("take_id")
+    if tid not in {e["info"]["id"] for e in exported_takes(paths, data)}:
+        raise MocapError(f"take {tid!r} hasn't been exported")
+    return {"board": board, "square_mm": square, "groundplane": bool(patch.get("groundplane", False)), "take_id": tid}
 
 
 def create_profile(paths, data: dict, payload: dict) -> dict:
@@ -239,48 +220,13 @@ def create_profile(paths, data: dict, payload: dict) -> dict:
     patch = dict(payload)
     if not patch.get("take_id"):
         patch["take_id"] = suggested_take(exported_takes(paths, data)) or None
-    s = _check_settings(paths, data, patch, partial=False)
+    s = _check_settings(paths, data, patch)
     now = time.time()
     p = {"id": _new_id(data), "name": name, **s, "status": "draft", "toml": None, "reprojection_error_px": None,
          "cameras": [], "created_at": None, "updated_at": now, "error": None, "groundplane_result": None,
          "freemocap": None, "calibrated_with": None}
     profiles(data).append(p)
     return p
-
-
-def update_profile(paths, data: dict, pid: str, payload: dict) -> dict:
-    p = get_profile(data, pid)
-    if p is None:
-        raise LookupError(pid)
-    patch = _check_settings(paths, data, {k: payload[k] for k in SETTINGS if k in payload}, partial=True)
-    if calibrated(p) and any(v != p.get(k) for k, v in patch.items()):
-        raise MocapError(f"{p['name']} is calibrated, so its settings are locked — duplicate it to try other settings")
-    if "name" in payload:
-        name = clean_name(payload["name"])
-        if name != p["name"]:
-            if any(q["name"] == name for q in profiles(data) if q["id"] != pid):
-                raise MocapError(f"a profile named {name!r} already exists")
-            old = _in_calib_dir(paths, p.get("toml"))
-            if old is not None and old.is_file():
-                new = old.with_name(f"{name}.toml")
-                os.replace(old, new)
-                p["toml"] = _rel(paths, new)
-            p["name"] = name
-    p.update(patch)
-    p["updated_at"] = time.time()
-    sync_mirror(data)
-    return p
-
-
-def duplicate_profile(data: dict, pid: str) -> dict:
-    p = get_profile(data, pid)
-    if p is None:
-        raise LookupError(pid)
-    q = {"id": _new_id(data), "name": unique_name(data, f"{p['name']}-copy"), **_settings(p), "status": "draft",
-         "toml": None, "reprojection_error_px": None, "cameras": [], "created_at": None, "updated_at": time.time(),
-         "error": None, "groundplane_result": None, "freemocap": None, "calibrated_with": None}
-    profiles(data).append(q)
-    return q
 
 
 def delete_profile(paths, data: dict, pid: str) -> None:
@@ -296,7 +242,6 @@ def delete_profile(paths, data: dict, pid: str) -> None:
     f = _in_calib_dir(paths, p.get("toml"))
     if f is not None:
         f.unlink(missing_ok=True)
-    sync_mirror(data)
 
 
 def set_active(data: dict, pid: str) -> None:
@@ -306,7 +251,6 @@ def set_active(data: dict, pid: str) -> None:
     if not calibrated(p):
         raise MocapError(f"{p['name']} isn't calibrated yet — run it first")
     data["mocap"]["active_profile"] = pid
-    sync_mirror(data)
 
 
 def set_take_profile(data: dict, tid: str, pid) -> None:
@@ -524,22 +468,32 @@ def view(store, name: str, freemocap: dict, process_jobs=(), calibrate_jobs=()) 
         "param_defaults": param_defaults(data),
         "profiles": profs,
         "active_profile": data["mocap"].get("active_profile"),
-        "calibration": data["mocap"].get("calibration"),
         "suggested_calibration_take": suggested_take(exported),
         "takes": takes,
     }
 
 
-def find_take(store, name: str, take_id: str) -> tuple[dict, dict]:
-    """(exported entry, described take) for ``take_id``, or MocapError."""
+def _describe_all(store, name: str) -> list[tuple[dict, dict]]:
+    """(exported entry, described take) for every exported take: one read of the session,
+    the profiles' TOMLs and output/."""
     data = store.load(name)
     paths = store.paths(name)
     prof_cams = {p["id"]: _profile_cameras(paths, p) for p in profiles(data)}
     calib_takes = {p.get("take_id") for p in profiles(data)}
     params = effective_params(data)
-    for e in exported_takes(paths, data):
+    return [(e, describe_take(e, data, prof_cams, set(), calib_takes, params)) for e in exported_takes(paths, data)]
+
+
+def described_takes(store, name: str) -> dict[str, dict]:
+    """Every exported take, described, by take id."""
+    return {e["info"]["id"]: tk for e, tk in _describe_all(store, name)}
+
+
+def find_take(store, name: str, take_id: str) -> tuple[dict, dict]:
+    """(exported entry, described take) for ``take_id``, or MocapError."""
+    for e, tk in _describe_all(store, name):
         if e["info"]["id"] == take_id:
-            return e, describe_take(e, data, prof_cams, set(), calib_takes, params)
+            return e, tk
     raise MocapError(f"take {take_id!r} hasn't been exported")
 
 
@@ -578,8 +532,6 @@ PARAM_SPEC = {
 
 
 def session_fps(data: dict) -> float:
-    from ..ffmpeg_tools import fps_float
-
     return round(fps_float(data["settings"].get("target_fps")) or 30.0, 3)
 
 
@@ -690,7 +642,6 @@ def run_calibrate(store, name: str, job, pid: str) -> dict:
     take_dir = paths.output / take["dir"]
     n_cams = len(take["cameras"])
     bars = runner.Bars()
-    job.live = {"profile": pid}
     job.set_progress(0.02, "starting FreeMoCap")
 
     def on_tqdm(bar):
@@ -749,7 +700,6 @@ def run_calibrate(store, name: str, job, pid: str) -> dict:
         })
         if not calibrated(active_profile(d)):
             d["mocap"]["active_profile"] = pid
-        sync_mirror(d)
         result = dict(q)
     err = result.get("reprojection_error_px")
     job.set_progress(1.0, f"{result['name']}: reprojection error {err:.2f} px" if isinstance(err, (int, float)) else "calibrated")
@@ -830,6 +780,7 @@ def run_process(store, name: str, job, takes: list[dict], processes: int,
                     "calibration": snapshot_calib,
                     "cameras": ev.get("cameras") or tk["cameras"],
                     "subset": bool(ev.get("subset")),
+                    "calibration_adjustments": list(ev.get("adjusted") or []),   # cameras rescaled to this take's video size
                     "toml": ev.get("toml"),
                     "processes": processes,
                     "params": ev.get("params") or params,
@@ -903,12 +854,10 @@ def run_process(store, name: str, job, takes: list[dict], processes: int,
 # take detail (Mocap step: what FreeMoCap produced for one take)
 
 BODY_POINTS = 33          # MediaPipe pose landmarks come first in FreeMoCap's tracked points
-_detail_cache: dict = {}  # (take dir, files' mtimes) -> computed quality
+_detail_cache: dict = {}  # take dir -> (files' mtimes, computed quality); one entry per take
 
 
 def _bone(body, a: int, b: int) -> list | None:
-    import numpy as np
-
     d = np.linalg.norm(body[:, a] - body[:, b], axis=1)
     d = d[np.isfinite(d)]
     if not d.size:
@@ -921,8 +870,6 @@ def _quality(take_dir: Path) -> dict | None:
     """Numbers from FreeMoCap's own arrays: mean reprojection error of the body points,
     frames with the whole body, gaps its post-processing filled, two bone lengths, and
     how often each camera saw the body. Cached by the files' mtimes."""
-    import numpy as np
-
     out = take_dir / "output_data"
     body_f = next(iter(sorted(out.glob("*_body_3d_xyz.npy"))), None)
     if body_f is None:
@@ -932,9 +879,10 @@ def _quality(take_dir: Path) -> dict | None:
     xyz_f = next(iter(sorted(raw.glob("*_3dData_numFrames_numTrackedPoints_spatialXYZ.npy"))), None)
     px_f = next(iter(sorted(raw.glob("*_2dData_numCams_numFrames_numTrackedPoints_pixelXY.npy"))), None)
     files = [f for f in (body_f, reproj_f, xyz_f, px_f) if f is not None]
-    key = (str(take_dir), tuple((f.name, f.stat().st_mtime) for f in files))
-    if key in _detail_cache:
-        return _detail_cache[key]
+    stamp = tuple((f.name, f.stat().st_mtime) for f in files)
+    cached = _detail_cache.get(str(take_dir))
+    if cached and cached[0] == stamp:
+        return cached[1]
     q: dict = {}
     try:
         body = np.asarray(np.load(body_f, mmap_mode="r")[:, :BODY_POINTS, :], dtype=float)
@@ -967,7 +915,7 @@ def _quality(take_dir: Path) -> dict | None:
             q["camera_detected_pct"] = seen
     except (OSError, ValueError, IndexError) as e:
         q["error"] = f"couldn't read FreeMoCap's output: {e}"
-    _detail_cache[key] = q
+    _detail_cache[str(take_dir)] = (stamp, q)
     return q
 
 

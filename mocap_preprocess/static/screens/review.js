@@ -6,7 +6,7 @@ import {
   GET, METHOD_COLORS, POST, PUT, S, activeJob, api, basename,
   cameraById, confirmModal, fileById, fmtClock, fmtDate, fmtDur, fmtOffset, fmtTC,
   fpsFloat, fpsLabel, h, icon, isMounted, mediaUrl, nextFree,
-  onJobs, pad2, pollSoon, prefs, refreshSession, render, reveal, sUrl,
+  pad2, pollSoon, prefs, putUi, refreshSession, sUrl,
   targetFps, tip, toast, videoFiles,
   METHOD_LABEL,
 } from '../app.js';
@@ -14,9 +14,9 @@ import { METHOD_TIP } from './sync.js';
 
 // ------------------------------------------------------------------ Review & export screen
 const SPEEDS = [0.25, 0.5, 1, 2];
-export const clone = (x) => JSON.parse(JSON.stringify(x));
+const clone = (x) => JSON.parse(JSON.stringify(x));
 
-export function sessionSpan() {
+function sessionSpan() {
   let end = 0;
   for (const f of videoFiles()) if (f.offset != null) end = Math.max(end, f.offset + (f.probe.duration || 0));
   return end || 60;
@@ -45,7 +45,7 @@ export function takeCoverage(tk, camIds) {
   });
 }
 
-export function coverageText(cov) {
+function coverageText(cov) {
   const missing = cov.filter((c) => c.missing).map((c) => c.cam?.name || '?');
   const padded = cov.filter((c) => !c.missing && c.padded).map((c) => `${c.cam?.name} +${(c.pre + c.gap + c.post).toFixed(1)}s pad`);
   const ok = cov.length - missing.length;
@@ -188,7 +188,6 @@ export const ReviewScreen = {
     this.onKey = (e) => this.key(e);
     window.addEventListener('keydown', this.onKey);
     this.sideSel = null;    // reveal the selected take (e.g. picked on Export) once
-    if (RV.preview === undefined) RV.preview = prefs.get('preview', false);   // Preview: FreeMoCap's videos in the tiles
     this.adopt();
     this.renderAll();
     this.loadPreviews();
@@ -225,11 +224,13 @@ export const ReviewScreen = {
     this.adopt();
     this.renderAll();
   },
-  onJobs() {
+  onJobs(list, finished = []) {
     this.renderTransportButtons();
     // a calibration, a mocap run or a preview build ended: new previews, new take colours
-    const busy = ['previews', 'mocap_process', 'mocap_calibrate'].some((k) => activeJob(k));
-    if (this.fmcBusy && !busy) this.loadPreviews();
+    // (`finished` also carries jobs that ran between two polls, which the busy flag never sees)
+    const kinds = ['previews', 'mocap_process', 'mocap_calibrate'];
+    const busy = kinds.some((k) => activeJob(k));
+    if ((this.fmcBusy && !busy) || finished.some((j) => kinds.includes(j.kind))) this.loadPreviews();
     this.fmcBusy = busy;
   },
   /** FreeMoCap's annotated videos per take (GET /previews): colours the takes, feeds Preview. */
@@ -247,7 +248,7 @@ export const ReviewScreen = {
   },
   async togglePreview() {
     RV.preview = !RV.preview;
-    prefs.set('preview', RV.preview);
+    putUi({ preview: RV.preview });
     this.buildGridFiles();
     if (RV.playing) this.grid.tick(RV.t); else this.grid.show(RV.t);
     this.renderTransportButtons();
@@ -271,11 +272,12 @@ export const ReviewScreen = {
     }
     if (RV.sel && RV.sel.kind === 'take' && !RV.takes.some((t) => t.id === RV.sel.id)) RV.sel = null;
     if (RV.sel && RV.sel.kind === 'file' && !fileById(RV.sel.id)) RV.sel = null;
-    const key = `audio.${S.name}`;
-    if (RV.audioCam === undefined || RV.audioKey !== key) {
-      RV.audioKey = key;
+    if (RV.uiFor !== S.name) {     // what this session's UI remembers: on the server, so every browser agrees
+      RV.uiFor = S.name;
+      const ui = S.data.ui || {};
       const ref = videoFiles().find((f) => f.sync?.method === 'reference');
-      RV.audioCam = prefs.get(key, ref ? ref.camera : (S.data.cameras[0] || {}).id || null);
+      RV.audioCam = ui.audio_camera ?? (ref ? ref.camera : (S.data.cameras[0] || {}).id || null);
+      RV.preview = !!ui.preview;   // Preview: FreeMoCap's videos in the tiles
     }
     RV.t = Math.min(RV.t, sessionSpan());
   },
@@ -729,13 +731,13 @@ export const ReviewScreen = {
     const open = prefs.get('insp', true);
     I.className = `inspector ${open ? '' : 'collapsed'} ${prefs.get('keysOpen', true) ? '' : 'keys-folded'}`;
     if (!open) {
-      I.append(h('button', { class: 'side-expand', title: 'Show inspector', onclick: () => { prefs.set('insp', true); this.renderInspector(); this.grid.layout(); } },
+      I.append(h('button', { class: 'side-expand', title: 'Show inspector', onclick: () => { prefs.set('insp', true); this.renderInspector(); } },
         icon('angles-left'), h('span', null, 'Inspector')));
       return;
     }
     const collapse = h('button', {
       class: 'mini-btn', title: 'Hide inspector', 'aria-label': 'Hide inspector',
-      onclick: () => { prefs.set('insp', false); this.renderInspector(); setTimeout(() => this.grid.layout(), 320); },
+      onclick: () => { prefs.set('insp', false); this.renderInspector(); },   // the grid refits itself as the column animates (ResizeObserver)
     }, icon('angles-right'));
     // small windows on top (what's selected), Hotkeys pinned at the bottom of the column
     const body = h('div', { class: 'insp-body' });
@@ -783,7 +785,7 @@ export const ReviewScreen = {
             class: 'input',
             onchange: (e) => {
               RV.audioCam = e.target.value || null;
-              prefs.set(RV.audioKey, RV.audioCam);
+              putUi({ audio_camera: RV.audioCam });
               this.grid.setAudio(RV.audioCam);
             },
           }, h('option', { value: '' }, 'muted'),
@@ -894,7 +896,7 @@ const MOUSE_HINTS = [
   ['wheel', 'zoom timeline'], ['shift + wheel', 'pan timeline'], ['wheel drag', 'pan timeline'], ['click video', 'full-quality frame'], ['drag in takes row', 'add a take'],
   ['double-click take', 'rename take'], ['click clip bar', 'nudge its offset'], ['click take', 'edit it'],
 ];
-window.addEventListener('beforeunload', () => {
+window.addEventListener('pagehide', () => {
   saveTakes(true);
   saveOpts(true);
   if (isMounted(ReviewScreen)) ReviewScreen.flushOffsets(true);

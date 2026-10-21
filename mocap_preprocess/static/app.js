@@ -1,4 +1,4 @@
-// mocap-preprocess UI. Plain ES modules, no build step.
+// Batlejka UI. Plain ES modules, no build step.
 import { loadSetup } from './setup.js';
 import { SessionScreen } from './screens/session.js';
 import { ProcessScreen } from './screens/process.js';
@@ -200,7 +200,7 @@ function stepDone(id) {
     case 'sync': return !!st.synced_at;
     case 'review': return (S.data?.takes || []).length > 0;
     case 'export': return !!st.exported_at;
-    case 'calibrate': return (S.data?.mocap?.profiles || []).some((p) => p.status === 'calibrated') || !!S.data?.mocap?.calibration;
+    case 'calibrate': return (S.data?.mocap?.profiles || []).some((p) => p.status === 'calibrated');
     case 'mocap': return Object.values(S.data?.mocap?.takes || {}).some((t) => t.status === 'done');
     default: return false;
   }
@@ -329,6 +329,14 @@ export async function reveal(what) {
   try { await POST(sUrl('/reveal'), { what }); } catch (e) { toast(e.message, 'error'); }
 }
 
+/** Part of what the UI remembers for this session (session.json "ui", so every browser agrees):
+ *  applied at once, saved in the background. */
+export function putUi(patch) {
+  if (!S.data) return;
+  S.data.ui = { ...(S.data.ui || {}), ...patch };
+  PUT(sUrl('/ui'), patch).catch((e) => toast(`Couldn't save the UI state: ${e.message}`, 'error'));
+}
+
 // ------------------------------------------------------------------ navigation / data
 const screens = {};
 let mounted = null;
@@ -442,11 +450,15 @@ const jobListeners = [];
 /** Call ``fn(jobs, finished)`` after every poll (finished = jobs that just stopped running). */
 export function onJobs(fn) { jobListeners.push(fn); }
 
+let lastPoll = Date.now() / 1000;    // server clock = this clock: same machine
+
 async function pollJobs() {
   clearTimeout(pollTimer);
   let next = 2500;
   try {
     const name = S.name;
+    const since = lastPoll;
+    lastPoll = Date.now() / 1000;
     const list = await GET(name ? `/api/jobs?session=${enc(name)}` : '/api/jobs?global_only=1');
     if (name !== S.name) { pollTimer = setTimeout(pollJobs, 150); return; }
     const finished = [];
@@ -454,7 +466,10 @@ async function pollJobs() {
     let refresh = false;
     for (const j of list) {
       const p = prev.get(j.id);
-      if (p && isActive(p) && !isActive(j)) {
+      // ended since the last poll: seen running before, or (a short job, e.g. the preview build
+      // after a mocap run) started and ended between two polls
+      const ended = !isActive(j) && ((p && isActive(p)) || (!p && j.finished > since));
+      if (ended) {
         refresh = true;
         finished.push(j);
         if (j.status === 'error') toast(`${j.label} failed: ${j.error}`, 'error');
@@ -469,7 +484,7 @@ async function pollJobs() {
     if (list.some(isActive)) next = 600;
     renderJobPill();
     if (S.logOpen) renderJobLog();
-    if (mounted && mounted.onJobs) mounted.onJobs();
+    if (mounted && mounted.onJobs) mounted.onJobs(list, finished);
     for (const fn of jobListeners) {
       try { fn(list, finished); } catch (e) { console.error(e); }
     }
@@ -520,25 +535,16 @@ document.addEventListener('focusout', hideTip);
 document.addEventListener('scroll', hideTip, true);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tipFor) hideTip(); });
 
-// ------------------------------------------------------------------ placeholder screens (filled in later milestones)
-for (const id of ['cameras', 'sync', 'review']) {
-  if (!screens[id]) {
-    screens[id] = {
-      mount(root) { root.append(h('main', { class: 'page' }, h('div', { class: 'empty' }, 'Coming up.'))); },
-    };
-  }
-}
-
 // ------------------------------------------------------------------ boot
 async function boot() {
-  loadSetup();     // not awaited: the Setup card fills in when it's ready
   try { S.health = await GET('/api/health'); } catch { S.health = null; }
   const fromHash = parseHash();
   if (fromHash) {
     S.name = fromHash.name;
     if (fromHash.step && STEPS.some((s) => s.id === fromHash.step)) S.step = fromHash.step;
   }
-  await loadSessions();
+  // nothing is rendered before the session is open: a screen mounted without S.data starts wrong
+  try { S.sessions = await GET('/api/sessions'); } catch (e) { toast(e.message, 'error'); }
   if (S.name && S.sessions.some((s) => s.name === S.name)) {
     await openSession(S.name);
   } else {
@@ -546,6 +552,7 @@ async function boot() {
     S.step = 'session';
     render();
   }
+  loadSetup();     // not awaited: the Setup card fills in when it's ready
   pollSoon();
 }
 boot();
