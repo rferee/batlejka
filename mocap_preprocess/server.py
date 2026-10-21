@@ -1,7 +1,6 @@
 """FastAPI app: JSON API, background jobs, static UI and media serving."""
 from __future__ import annotations
 
-import inspect
 import logging
 import os
 import re
@@ -11,7 +10,7 @@ import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import aio_fix, config
@@ -96,17 +95,9 @@ async def _no_cache_ui(request: Request, call_next):
     return response
 
 
-def _session(s: str) -> str:
-    return require_session(s)
-
-
 def _require_tools() -> None:
     if not config.ffmpeg_path() or not config.ffprobe_path():
         raise HTTPException(503, "ffmpeg/ffprobe not found on PATH (or set MOCAP_FFMPEG / MOCAP_FFPROBE)")
-
-
-def _job_response(job) -> dict:
-    return job.info(log_since=0)
 
 
 # ---------------------------------------------------------------------------
@@ -147,15 +138,15 @@ def session_view(name: str) -> dict:
 
 @app.get("/api/sessions/{s}")
 def get_session(s: str):
-    return session_view(_session(s))
+    return session_view(require_session(s))
 
 
 @app.post("/api/sessions/{s}/scan")
 def scan_session(s: str):
-    name = _session(s)
+    name = require_session(s)
     _require_tools()
     job = jobs.start("scan", name, lambda j: pipeline.scan(store, name, j), label="Scan source")
-    return _job_response(job)
+    return job.info(log_since=0)
 
 
 SAMPLE_RATES = (4000, 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
@@ -191,7 +182,7 @@ def _apply_settings(data: dict, payload: dict) -> None:
 
 @app.put("/api/sessions/{s}/settings")
 def put_settings(s: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     with store.edit(name) as data:
         _apply_settings(data, payload)
     return session_view(name)
@@ -205,28 +196,17 @@ def _start_proxies(name: str):
 
 
 @app.post("/api/sessions/{s}/process")
-def process_session(s: str, payload: dict = Body(default={})):
-    name = _session(s)
+def process_session(s: str):
+    name = require_session(s)
     _require_tools()
-    if (payload or {}).get("settings"):
-        with store.edit(name) as data:
-            _apply_settings(data, payload["settings"])
     job = jobs.start("process", name, lambda j: pipeline.process(store, name, j, lambda: _start_proxies(name)),
                      label="Process source files")
-    return _job_response(job)
-
-
-@app.post("/api/sessions/{s}/proxies")
-def build_proxies(s: str):
-    name = _session(s)
-    _require_tools()
-    job = _start_proxies(name) or next(iter(jobs.active(name, "proxies")), None)
-    return _job_response(job)
+    return job.info(log_since=0)
 
 
 @app.post("/api/sessions/{s}/regroup")
 def regroup(s: str):
-    name = _session(s)
+    name = require_session(s)
 
     def run(job):
         paths = store.paths(name)
@@ -236,7 +216,7 @@ def regroup(s: str):
         job.log(f"grouped into {n} camera(s)")
         return {"cameras": n}
 
-    return _job_response(jobs.start("regroup", name, run, label="Re-run grouping"))
+    return jobs.start("regroup", name, run, label="Re-run grouping").info(log_since=0)
 
 
 _CAM_ID = re.compile(r"^c\d{1,4}$")
@@ -244,7 +224,7 @@ _CAM_ID = re.compile(r"^c\d{1,4}$")
 
 @app.put("/api/sessions/{s}/cameras")
 def put_cameras(s: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     cams_in = payload.get("cameras")
     assignments = payload.get("assignments") or {}
     if not isinstance(cams_in, list) or not isinstance(assignments, dict):
@@ -287,7 +267,7 @@ _UI_KEYS = {"audio_camera": (str, type(None)), "preview": (bool,), "mocap_select
 @app.put("/api/sessions/{s}/ui")
 def put_ui(s: str, payload: dict = Body(...)):
     """A partial update of what the UI remembers per session (see session_store.default_ui)."""
-    name = _session(s)
+    name = require_session(s)
     for key, value in payload.items():
         if key not in _UI_KEYS:
             raise HTTPException(400, f"unknown ui key: {key}")
@@ -300,17 +280,17 @@ def put_ui(s: str, payload: dict = Body(...)):
 
 @app.post("/api/sessions/{s}/sync")
 def sync(s: str, payload: dict = Body(default={})):
-    name = _session(s)
+    name = require_session(s)
     _require_tools()
     resync_manual = bool((payload or {}).get("resync_manual", False))
     job = jobs.start("sync", name, lambda j: syncing.sync_session(store, name, j, resync_manual),
                      label="Sync by audio")
-    return _job_response(job)
+    return job.info(log_since=0)
 
 
 @app.put("/api/sessions/{s}/files/{fid}/offset")
 def put_offset(s: str, fid: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     validate_fid(fid)
     try:
         offset = float(payload["offset"])
@@ -328,7 +308,7 @@ def put_offset(s: str, fid: str, payload: dict = Body(...)):
 
 @app.post("/api/sessions/{s}/files/{fid}/resync")
 def resync(s: str, fid: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     validate_fid(fid)
     ref = validate_fid(str((payload or {}).get("ref_fid", "")))
     if jobs.active(name, "sync"):
@@ -341,12 +321,12 @@ def resync(s: str, fid: str, payload: dict = Body(...)):
                 + ("" if res["accepted"] else " — weak match, check it"), "info" if res["accepted"] else "warn")
         return res
 
-    return _job_response(jobs.start("resync", name, run, label="Re-sync file"))
+    return jobs.start("resync", name, run, label="Re-sync file").info(log_since=0)
 
 
 @app.put("/api/sessions/{s}/takes")
 def put_takes(s: str, payload: list = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     try:
         clean = takes_mod.validate(payload)
     except (ValueError, KeyError, TypeError) as e:
@@ -358,7 +338,7 @@ def put_takes(s: str, payload: list = Body(...)):
 
 @app.post("/api/sessions/{s}/takes/auto")
 def auto_takes(s: str, payload: dict = Body(default={})):
-    name = _session(s)
+    name = require_session(s)
     with store.edit(name) as data:
         if data["takes"] and not (payload or {}).get("replace"):
             raise HTTPException(409, "takes already exist; pass {replace: true}")
@@ -368,7 +348,7 @@ def auto_takes(s: str, payload: dict = Body(default={})):
 
 @app.put("/api/sessions/{s}/export_options")
 def put_export_options(s: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     with store.edit(name) as data:
         data["export_options"] = exporter.normalize_options(payload, config.DEFAULT_EXPORT_OPTIONS)
     return {"export_options": data["export_options"]}
@@ -376,7 +356,7 @@ def put_export_options(s: str, payload: dict = Body(...)):
 
 @app.post("/api/sessions/{s}/export")
 def export(s: str, payload: dict = Body(...)):
-    name = _session(s)
+    name = require_session(s)
     _require_tools()
     take_ids = [str(x) for x in (payload.get("take_ids") or [])]
     camera_ids = [str(x) for x in (payload.get("camera_ids") or [])]
@@ -388,12 +368,12 @@ def export(s: str, payload: dict = Body(...)):
         raise HTTPException(400, "select at least one take and one camera")
     job = jobs.start("export", name, lambda j: exporter.export(store, name, j, take_ids, camera_ids, opts),
                      label="Export takes")
-    return _job_response(job)
+    return job.info(log_since=0)
 
 
 @app.post("/api/sessions/{s}/reveal")
 def reveal(s: str, payload: dict = Body(default={})):
-    name = _session(s)
+    name = require_session(s)
     paths = store.paths(name)
     what = (payload or {}).get("what", "session")
     target = {"session": paths.root, "output": paths.output, "source": paths.source}.get(what)
@@ -423,12 +403,9 @@ def reveal(s: str, payload: dict = Body(default={})):
 def list_jobs(session: str | None = None, global_only: bool = False):
     """A session's jobs plus the global ones (session None, e.g. FreeMoCap setup);
     ``global_only`` for when no session is open; neither = every job."""
-    if global_only:
-        return [j.info() for j in jobs.list() if j.session is None]
     if session is not None:
         session = validate_session_name(session)
-        return [j.info() for j in jobs.list() if j.session in (session, None)]
-    return [j.info() for j in jobs.list()]
+    return [j.info() for j in jobs.list(session, global_only=global_only)]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -448,52 +425,10 @@ def cancel_job(job_id: str):
 
 
 # ---------------------------------------------------------------------------
-# media (Range support is required for <video> seeking in Chrome)
+# media (Starlette's FileResponse answers Range requests, which <video> seeking needs)
 
-def _file_response_handles_range() -> bool:
-    try:
-        src = inspect.getsource(FileResponse).lower()
-    except (OSError, TypeError):
-        return False
-    return "content-range" in src and "206" in src
-
-
-FILE_RESPONSE_RANGE = _file_response_handles_range()
-_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
-
-
-def _range_response(path: Path, media_type: str, request: Request) -> Response:
-    """Starlette's FileResponse handles Range itself in recent versions; this
-    is the fallback for older installs."""
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
-    rng = request.headers.get("range")
-    if FILE_RESPONSE_RANGE or not rng:
-        return FileResponse(path, media_type=media_type, headers=headers)
-    size = path.stat().st_size
-    m = _RANGE.match(rng.strip())
-    if not m or (m.group(1) == "" and m.group(2) == ""):
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
-    if m.group(1) == "":
-        start, end = max(0, size - int(m.group(2))), size - 1
-    else:
-        start = int(m.group(1))
-        end = min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
-    if start >= size or start > end:
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
-
-    def body():
-        with open(path, "rb") as fh:
-            fh.seek(start)
-            remaining = end - start + 1
-            while remaining > 0:
-                chunk = fh.read(min(1 << 16, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                yield chunk
-
-    headers.update({"Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(end - start + 1)})
-    return StreamingResponse(body(), status_code=206, media_type=media_type, headers=headers)
+def _media_file(path: Path, media_type: str) -> FileResponse:
+    return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes", "Cache-Control": "no-cache"})
 
 
 _MEDIA = {"thumb": ("jpg", "image/jpeg"), "proxy": ("mp4", "video/mp4"), "wave": ("json", "application/json")}
@@ -503,9 +438,9 @@ _PLAIN_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")   # take and camera ids (t12, c
 
 
 @app.get("/media/{s}/preview/{take_id}/{filename}")
-def media_preview(s: str, take_id: str, filename: str, request: Request):
+def media_preview(s: str, take_id: str, filename: str):
     """A Cut Takes preview (previews.py): .preprocess/previews/<take id>/<camera id>.mp4."""
-    name = _session(s)
+    name = require_session(s)
     stem, dot, ext = filename.rpartition(".")
     if not dot or ext != "mp4":
         raise HTTPException(404, "not found")
@@ -514,12 +449,12 @@ def media_preview(s: str, take_id: str, filename: str, request: Request):
     path = previews.preview_path(store.paths(name), take_id, stem)
     if not path.is_file():
         raise HTTPException(404, "not built yet")
-    return _range_response(path, "video/mp4", request)
+    return _media_file(path, "video/mp4")
 
 
 @app.get("/media/{s}/{kind}/{filename}")
-def media(s: str, kind: str, filename: str, request: Request):
-    name = _session(s)
+def media(s: str, kind: str, filename: str):
+    name = require_session(s)
     if kind not in _MEDIA:
         raise HTTPException(404, "unknown media kind")
     ext, mime = _MEDIA[kind]
@@ -531,7 +466,7 @@ def media(s: str, kind: str, filename: str, request: Request):
     path = {"thumb": paths.thumb, "proxy": paths.proxy, "wave": paths.wave_json}[kind](fid)
     if not path.exists():
         raise HTTPException(404, "not built yet")
-    return _range_response(path, mime, request)
+    return _media_file(path, mime)
 
 
 # ---------------------------------------------------------------------------

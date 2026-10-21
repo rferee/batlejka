@@ -6,7 +6,6 @@ import json
 import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -436,10 +435,3 @@ def run_proxies(store: SessionStore, name: str, job: Job) -> dict:
 
 def standard_rates() -> list[dict]:
     return [{"value": r, "label": ff.fps_label(r)} for r in config.STANDARD_FPS]
-
-
-def fraction_ok(value: str) -> bool:
-    try:
-        return Fraction(value) > 0
-    except (ValueError, ZeroDivisionError):
-        return False

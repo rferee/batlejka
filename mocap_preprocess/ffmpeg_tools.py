@@ -442,12 +442,3 @@ def count_video_frames(path: Path) -> int | None:
         return None
     text = r.stdout.decode("utf-8", "replace").strip().split(",")[0].strip()
     return _int(text)
-
-
-def video_stream_info(path: Path) -> dict | None:
-    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=width,height,r_frame_rate,avg_frame_rate", "-of", "json", path], timeout=60)
-    if r.returncode != 0:
-        return None
-    streams = json.loads(r.stdout.decode("utf-8", "replace") or "{}").get("streams") or []
-    return streams[0] if streams else None

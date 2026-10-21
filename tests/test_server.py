@@ -40,19 +40,6 @@ def test_proxy_range_requests_return_206(client, processed):
     assert tail.status_code == 206 and tail.content == full.content[-64:]
 
 
-def test_range_fallback_implementation(client, processed, monkeypatch):
-    """The hand-written range responder (used when Starlette lacks Range support)."""
-    store, name, _ = processed
-    monkeypatch.setattr(server, "FILE_RESPONSE_RANGE", False)
-    f = store.load(name)["files"][0]
-    url = f"/media/{name}/proxy/{f['id']}.mp4"
-    size = store.paths(name).proxy(f["id"]).stat().st_size
-    r = client.get(url, headers={"Range": "bytes=10-19"})
-    assert r.status_code == 206 and len(r.content) == 10
-    assert r.headers["content-range"] == f"bytes 10-19/{size}"
-    assert client.get(url, headers={"Range": f"bytes={size + 5}-"}).status_code == 416
-
-
 def test_rejects_traversal_and_bad_ids(client):
     assert client.get("/api/sessions/..%2F..%2Fetc").status_code in (400, 404)
     assert client.get(f"/media/{NAME}/proxy/..%2Fsession.json").status_code in (400, 404)

@@ -89,8 +89,6 @@ class Job:
             d["log_seq"] = self._seq
             if log_since is not None:
                 d["log"] = [e for e in self._log if e["seq"] > log_since]
-            else:
-                d["log_tail"] = list(self._log)[-3:]
         if live:
             d["live"] = self.live
         return d
@@ -156,8 +154,15 @@ class JobManager:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
-    def list(self, session: str | None = None) -> list[Job]:
-        jobs = [j for j in self._jobs.values() if session is None or j.session == session]
+    def list(self, session: str | None = None, *, global_only: bool = False) -> list[Job]:
+        """``session``: that session's jobs plus the global ones (session None); ``global_only``:
+        just the global ones; neither: every job. Oldest first."""
+        if global_only:
+            jobs = [j for j in self._jobs.values() if j.session is None]
+        elif session is not None:
+            jobs = [j for j in self._jobs.values() if j.session in (session, None)]
+        else:
+            jobs = list(self._jobs.values())
         return sorted(jobs, key=lambda j: j.created)
 
     def active(self, session: str | None, kind: str | None = None) -> list[Job]:

@@ -13,7 +13,7 @@ from .routes_previews import after_mocap_job
 
 router = APIRouter()
 
-CALIBRATE, PROCESS = "mocap_calibrate", "mocap_process"
+CALIBRATE, PROCESS = mocap.JOB_CALIBRATE, mocap.JOB_PROCESS
 
 
 def _freemocap() -> dict:
@@ -40,10 +40,6 @@ def _described(name: str, take_id: str) -> dict:
         return mocap.find_take(store, name, str(take_id))[1]
     except mocap.MocapError as e:
         raise HTTPException(400, str(e))
-
-
-def _job_response(job) -> dict:
-    return job.info(log_since=0)
 
 
 def _view(name: str) -> dict:
@@ -169,7 +165,7 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
 
     job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}")
     job.live = {"profile": pid}
-    return _job_response(job)
+    return job.info(log_since=0)
 
 
 @router.post("/api/sessions/{s}/mocap/calibrate")
@@ -298,4 +294,4 @@ def process(s: str, payload: dict = Body(...)):
         finally:
             after_mocap_job(name, job)      # the skeleton videos get previews for Cut Takes
 
-    return _job_response(jobs.start(PROCESS, name, run, label="Process mocap"))
+    return jobs.start(PROCESS, name, run, label="Process mocap").info(log_since=0)

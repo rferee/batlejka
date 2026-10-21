@@ -32,6 +32,7 @@ from . import runner
 VIDEO_DIR = "synchronized_videos"
 MOCAP_INFO = "mocap_info.json"
 CALIB_DIR = "calibrations"          # output/calibrations/<profile name>.toml
+JOB_CALIBRATE, JOB_PROCESS = "mocap_calibrate", "mocap_process"     # the two job kinds this module runs
 BOARDS = ("7x5", "5x3")
 SETTINGS = ("take_id", "board", "square_mm", "groundplane")
 # how far into a take each FreeMoCap stage is (2D tracking fills 0 → 0.75 from the tqdm bars)

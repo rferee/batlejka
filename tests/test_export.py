@@ -15,6 +15,16 @@ from conftest import files_by_rel
 from mocap_preprocess import config, exporter, ffmpeg_tools as ff, takes
 from mocap_preprocess.jobs import Job
 
+
+def video_stream_info(path) -> dict | None:
+    """The first video stream's width, height and frame rates, as ffprobe reports them."""
+    r = ff.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=width,height,r_frame_rate,avg_frame_rate", "-of", "json", path], timeout=60)
+    if r.returncode != 0:
+        return None
+    streams = json.loads(r.stdout.decode("utf-8", "replace") or "{}").get("streams") or []
+    return streams[0] if streams else None
+
 FPS = 30000 / 1001
 WIDE = {"id": "t9", "name": "wide take", "start": 3.0, "end": 19.5, "export": True}
 SPLIT = {"id": "t10", "name": "split take", "start": 12.0, "end": 30.0, "export": True}  # across every phone's break
@@ -116,7 +126,7 @@ def test_equal_frame_counts_and_fps(exported):
         assert len(vids) == len(data["cameras"])
         for v in vids:
             assert ff.count_video_frames(v) == n, v
-            info = ff.video_stream_info(v)
+            info = video_stream_info(v)
             assert info["r_frame_rate"] == "30000/1001", v
         assert json.loads((d / "take_info.json").read_text())["frames"] == n
 
@@ -125,10 +135,10 @@ def test_rotation_applied(exported):
     store, name, _, data, _, _, fuji_cam = exported
     cams = {c["id"]: c["name"] for c in data["cameras"]}
     for _, d in take_dirs(store, name, data):
-        fuji = ff.video_stream_info(d / "synchronized_videos" / f"{cams[fuji_cam]}_synced.mp4")
+        fuji = video_stream_info(d / "synchronized_videos" / f"{cams[fuji_cam]}_synced.mp4")
         assert (fuji["width"], fuji["height"]) == (360, 640)   # 640×360 display, rotated 90°
         other = next(c for c in cams if c != fuji_cam)
-        phone = ff.video_stream_info(d / "synchronized_videos" / f"{cams[other]}_synced.mp4")
+        phone = video_stream_info(d / "synchronized_videos" / f"{cams[other]}_synced.mp4")
         assert (phone["width"], phone["height"]) == (360, 640)  # untouched portrait
         # rotation is baked into the pixels: no display matrix left for players to apply again
         for v in (d / "synchronized_videos").glob("*_synced.mp4"):
@@ -219,7 +229,7 @@ def test_flat_layout_and_skip_without_overlap(exported):
     d = store.paths(name).output / "between takes"
     vids = sorted(d.glob("*_synced.mp4"))
     assert res["skipped"] == 3 and len(vids) == 1     # only the continuous camera covers the gap
-    info = ff.video_stream_info(vids[0])
+    info = video_stream_info(vids[0])
     assert max(info["width"], info["height"]) == 320
     assert len(json.loads((d / "take_info.json").read_text())["skipped"]) == 3
 
@@ -269,7 +279,7 @@ def test_gpu_pipeline_gives_the_same_takes(exported):
             for c in cams.values():
                 v = d / f"{c}_synced.mp4"
                 assert ff.count_video_frames(v) == n, v
-                info = ff.video_stream_info(v)
+                info = video_stream_info(v)
                 assert (info["width"], info["height"]) == (360, 640), v   # rotation, incl. the Fuji's metadata
                 assert display_rotation(v) == 0, v                         # ...and not applied twice by players
             if tk["id"] != WIDE["id"]:

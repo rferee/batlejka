@@ -1,4 +1,5 @@
-fastapi>=0.110
+fastapi>=0.115
+starlette>=0.49.1   # FileResponse answers Range requests (video seeking) since 0.41; 0.49.1 fixed CVE-2025-62727 in that parser
 uvicorn>=0.27
 numpy>=1.24
 scipy>=1.10

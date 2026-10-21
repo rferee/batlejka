@@ -9,7 +9,6 @@ user rotation baked in — the only place pixels are rotated (R1) — and exactl
 """
 from __future__ import annotations
 
-import json
 import math
 import threading
 import time
@@ -500,8 +499,3 @@ def encode_one(tk: dict, plan: CamPlan, n: int, srcs: list[Path], fps: Fraction,
         return False
     plan.status = "written"
     return True
-
-
-def read_take_info(path: Path) -> dict:
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
