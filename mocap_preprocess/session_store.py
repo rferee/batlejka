@@ -116,7 +116,35 @@ class SessionPaths:
 
 
 def default_mocap() -> dict:
-    return {"calibration": None, "options": {"processes": None, "blender": False, "blender_exe": None}, "takes": {}}
+    return {"profiles": [], "active_profile": None, "calibration": None,
+            "options": {"processes": None, "blender": False, "blender_exe": None, "params": {}}, "takes": {}}
+
+
+def _migrate_mocap(mocap: dict) -> None:
+    """Sessions from before calibration profiles had one ``mocap.calibration``: it becomes
+    the first (active) profile. Pure data — its TOML is copied away lazily, when another
+    calibration of the same take would overwrite it (fmc.mocap)."""
+    if isinstance(mocap.get("profiles"), list):
+        mocap.setdefault("active_profile", None)
+        return
+    mocap["profiles"] = []
+    mocap["active_profile"] = None
+    old = mocap.get("calibration")
+    if not isinstance(old, dict) or not old.get("toml"):
+        return
+    sq = old.get("square_mm")
+    name = f"{old.get('board') or 'board'}-{sq:g}mm" if isinstance(sq, (int, float)) else str(old.get("board") or "calibration")
+    settings = {"take_id": old.get("take_id"), "board": old.get("board"), "square_mm": sq,
+                "groundplane": bool(old.get("groundplane"))}
+    mocap["profiles"].append({
+        "id": "p1", "name": name, **settings, "status": "calibrated", "toml": old.get("toml"),
+        "reprojection_error_px": old.get("reprojection_error_px"), "cameras": old.get("cameras") or [],
+        "created_at": old.get("created_at"), "updated_at": old.get("created_at"), "error": None,
+        "groundplane_result": old.get("groundplane_result"), "freemocap": old.get("freemocap"),
+        "calibrated_with": dict(settings),
+    })
+    mocap["active_profile"] = "p1"
+    old.update(profile="p1", profile_name=name)
 
 
 def default_export_options() -> dict:
@@ -157,6 +185,7 @@ def _normalize(data: dict, name: str) -> dict:
     mocap.setdefault("calibration", None)
     mocap["options"] = {**default_mocap()["options"], **(mocap.get("options") or {})}
     mocap.setdefault("takes", {})
+    _migrate_mocap(mocap)
     data["name"] = name
     for f in data["files"]:
         f.setdefault("assets", {})

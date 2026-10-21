@@ -9,7 +9,7 @@ the mocap-preprocess app. It only uses the stdlib plus what FreeMoCap installs.
 Commands
     check                                   versions + OpenCV sanity check
     calibrate <calib_rec> --square-mm 39 [--board 7x5|5x3] [--groundplane]
-    process   <take> [<take> ...] --toml <file.toml> [--processes N] [--blender ...]
+    process   <take> [<take> ...] --toml <file.toml> [--processes N] [--params p.json] [--blender ...]
     all       <calib_rec> <take> [<take> ...] --square-mm 39 [...calibrate and process options]
     selftest  --workdir DIR [--processes N]  downloads FreeMoCap's 3-camera test
                                              recording (~38 MB), calibrates, processes,
@@ -315,20 +315,79 @@ def calibrate(calib_recording: Path, square_mm: float, board: str, groundplane: 
 
 # --------------------------------------------------------------------------- process
 
-def process(take: Path, toml_path: Path, processes: int, run_blender: bool, blender_exe) -> dict:
+# --params: a flat JSON object of FreeMoCap 1.8.2's own field names, sorted into its models.
+# Absent keys keep FreeMoCap's defaults. num_processes comes from --processes.
+PARAM_GROUPS = {
+    "tracking": ("run_image_tracking", "mediapipe_model_complexity", "min_detection_confidence",
+                 "min_tracking_confidence", "static_image_mode", "use_yolo_crop_method", "yolo_model_size",
+                 "bounding_box_buffer_percentage", "buffer_size_method"),          # MediapipeTrackingParams
+    "triangulation": ("run_3d_triangulation", "minimum_cameras_for_triangulation", "flatten_single_camera_data",
+                      "use_triangulate_outlier_rejection", "maximum_cameras_to_drop",
+                      "target_reprojection_error"),                                    # AniposeTriangulate3DParametersModel
+    "post": ("run_butterworth_filter", "framerate"),                                 # PostProcessingParametersModel
+    "filter": ("cutoff_frequency", "order"),                                         # ButterworthFilterParametersModel
+}
+
+
+def split_params(params: dict | None) -> dict:
+    # {group: {field: value}} for the keys present; unknown keys are an error
+    params = dict(params or {})
+    known = {k: g for g, keys in PARAM_GROUPS.items() for k in keys}
+    unknown = sorted(k for k in params if k not in known)
+    if unknown:
+        raise ValueError(f"unknown FreeMoCap parameter(s): {unknown}")
+    out = {g: {} for g in PARAM_GROUPS}
+    for k, v in params.items():
+        out[known[k]][k] = v
+    return out
+
+
+def build_processing_params(params: dict | None, processes: int):
+    from freemocap.data_layer.recording_models.post_processing_parameter_models import (
+        AniposeTriangulate3DParametersModel,
+        ButterworthFilterParametersModel,
+        PostProcessingParametersModel,
+        ProcessingParameterModel,
+    )
+    from skellytracker.trackers.mediapipe_tracker.mediapipe_model_info import MediapipeTrackingParams
+
+    g = split_params(params)
+    post = dict(g["post"])
+    filt = dict(g["filter"])
+    if "framerate" in post:
+        # 1.8.2's filter reads post_processing_parameters_model.framerate; keep the (unused)
+        # sampling_rate in step so the recording_parameters.json FreeMoCap writes isn't misleading
+        filt["sampling_rate"] = post["framerate"]
+    return ProcessingParameterModel(
+        tracking_parameters_model=MediapipeTrackingParams(num_processes=max(1, int(processes)), **g["tracking"]),
+        anipose_triangulate_3d_parameters_model=AniposeTriangulate3DParametersModel(**g["triangulation"]),
+        post_processing_parameters_model=PostProcessingParametersModel(
+            butterworth_filter_parameters=ButterworthFilterParametersModel(**filt), **post),
+    )
+
+
+def applied_params(model) -> dict:
+    # the flat parameters a model ends up with (FreeMoCap's defaults filled in)
+    t = model.tracking_parameters_model
+    a = model.anipose_triangulate_3d_parameters_model
+    p = model.post_processing_parameters_model
+    out = {k: getattr(t, k) for k in PARAM_GROUPS["tracking"]}
+    out.update({k: getattr(a, k) for k in PARAM_GROUPS["triangulation"]})
+    out.update({k: getattr(p, k) for k in PARAM_GROUPS["post"]})
+    out.update({k: getattr(p.butterworth_filter_parameters, k) for k in PARAM_GROUPS["filter"]})
+    return out
+
+
+def process(take: Path, toml_path: Path, processes: int, run_blender: bool, blender_exe, params_in=None) -> dict:
     from freemocap.core_processes.process_motion_capture_videos.process_recording_headless import (
         process_recording_headless,
     )
-    from freemocap.data_layer.recording_models.post_processing_parameter_models import ProcessingParameterModel
-    from skellytracker.trackers.mediapipe_tracker.mediapipe_model_info import MediapipeTrackingParams
 
     t0 = time.time()
     take_cams = check_recording(take)
     used_toml, is_subset = prepare_take_calibration(take, take_cams, toml_path)
 
-    params = ProcessingParameterModel(
-        tracking_parameters_model=MediapipeTrackingParams(num_processes=max(1, int(processes))),
-    )
+    params = build_processing_params(params_in, processes)
     STAGES.reset(take.name)
     process_recording_headless(
         recording_path=take,
@@ -351,17 +410,33 @@ def process(take: Path, toml_path: Path, processes: int, run_blender: bool, blen
         "toml": used_toml,
         "blend": next(iter(take.glob("*.blend")), None),
         "seconds": round(time.time() - t0, 1),
+        "params": applied_params(params),
+        "processes": params.tracking_parameters_model.num_processes,
     }
     say(f"[ok] processed {take.name} -> {output}")
     return info
 
 
+def load_params(path) -> dict | None:
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        params = json.load(fh)
+    if not isinstance(params, dict):
+        raise ValueError(f"--params {path}: expected a JSON object")
+    split_params(params)                      # fail on unknown keys before any work
+    return params
+
+
 def process_many(takes: list, toml_path: Path, args) -> tuple:
     done, failed = [], {}
+    params_in = load_params(getattr(args, "params", None))
+    if params_in:
+        say(f"[params] {json.dumps(params_in, sort_keys=True)}")
     for i, take in enumerate(takes):
         emit_event("take_start", take=take.name, index=i, total=len(takes))
         try:
-            info = process(take, toml_path, args.processes, args.blender, args.blender_exe)
+            info = process(take, toml_path, args.processes, args.blender, args.blender_exe, params_in)
             done.append(info)
             emit_event("take_done", **info)
         except Exception as e:  # noqa: BLE001 - keep going with the other takes
@@ -478,6 +553,8 @@ def main() -> int:
 
     def proc_args(p):
         p.add_argument("--processes", type=int, default=1, help="2D tracking processes (one per camera max)")
+        p.add_argument("--params", type=Path, default=None,
+                       help="JSON object of FreeMoCap processing parameters (its own field names; absent = its default)")
         p.add_argument("--blender", action="store_true", help="also export a .blend")
         p.add_argument("--blender-exe", default=None)
 
