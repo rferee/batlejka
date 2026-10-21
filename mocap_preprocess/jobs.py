@@ -101,12 +101,14 @@ class JobManager:
         self._max_history = max_history
 
     def start(self, kind: str, session: str | None, fn: Callable[[Job], object],
-              label: str | None = None) -> Job:
+              label: str | None = None, live=None) -> Job:
+        """Run ``fn(job)`` in a thread; ``live`` is the job's first live snapshot, set before it starts."""
         with self._lock:
             for j in self._jobs.values():
                 if j.kind == kind and j.session == session and j.status in ACTIVE:
                     raise JobConflict(f"a {kind} job is already running for {session}")
             job = Job(kind, session, label)
+            job.live = live
             self._jobs[job.id] = job
             self._prune()
         threading.Thread(target=self._run, args=(job, fn), name=f"job-{kind}-{job.id}", daemon=True).start()

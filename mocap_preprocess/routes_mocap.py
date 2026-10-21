@@ -80,33 +80,8 @@ def put_options(s: str, payload: dict = Body(...)):
 
 
 # ---------------------------------------------------------------------------
-# profiles
-
-@router.post("/api/sessions/{s}/mocap/profiles")
-def create_profile(s: str, payload: dict = Body(...)):
-    """{name, take_id?, board?, square_mm?, groundplane?} → a "draft" (not run) profile."""
-    name = require_session(s)
-    p = _edit(name, lambda paths, data: mocap.create_profile(paths, data, payload or {}))
-    return {"profile": p["id"], **_view(name)}
-
-
-@router.put("/api/sessions/{s}/mocap/profiles/{pid}")
-def update_profile(s: str, pid: str, payload: dict = Body(...)):
-    """{name?, take_id?, board?, square_mm?, groundplane?}. A calibrated profile keeps its
-    result (``settings_changed`` tells the UI it no longer matches) until it's recalibrated."""
-    name = require_session(s)
-    if _calibrating(name, pid):
-        raise HTTPException(409, "that profile is calibrating — wait for it or cancel it")
-    _edit(name, lambda paths, data: mocap.update_profile(paths, data, pid, payload or {}))
-    return _view(name)
-
-
-@router.post("/api/sessions/{s}/mocap/profiles/{pid}/duplicate")
-def duplicate_profile(s: str, pid: str):
-    name = require_session(s)
-    p = _edit(name, lambda paths, data: mocap.duplicate_profile(data, pid))
-    return {"profile": p["id"], **_view(name)}
-
+# profiles (made by the New profile form, POST .../mocap/calibrate; the Calibrate screen's
+# Duplicate copies a profile's settings into that form)
 
 @router.delete("/api/sessions/{s}/mocap/profiles/{pid}")
 def delete_profile(s: str, pid: str):
@@ -124,10 +99,9 @@ def activate_profile(s: str, pid: str):
     return _view(name)
 
 
-@router.post("/api/sessions/{s}/mocap/profiles/{pid}/calibrate")
-def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
-    """Run FreeMoCap's calibration for a profile → job (kind mocap_calibrate, job.live.profile)."""
-    name = require_session(s)
+def _start_calibration(name: str, pid: str, delete_leftovers: bool) -> dict:
+    """Check that profile ``pid`` can calibrate right now and start the job
+    (kind mocap_calibrate, job.live.profile); HTTPException otherwise."""
     _require_ready()
     data = store.load(name)
     p = mocap.get_profile(data, pid)
@@ -146,7 +120,7 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
         raise HTTPException(400, f"{take['name']}: videos missing on disk: {', '.join(take['missing'])} — re-export it")
     if len(take["cameras"]) < 2:
         raise HTTPException(400, f"{take['name']}: needs at least 2 cameras, has {len(take['cameras'])}")
-    if take["leftovers"] and not (payload or {}).get("delete_leftovers"):
+    if take["leftovers"] and not delete_leftovers:
         _leftover_conflict({take["take_id"]: take["leftovers"]}, "the calibration")
     if jobs.active(name, PROCESS):
         raise HTTPException(409, "mocap processing is running — wait for it or cancel it first")
@@ -163,9 +137,14 @@ def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
         finally:
             after_mocap_job(name, job)      # its board videos get previews for Cut Takes
 
-    job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}")
-    job.live = {"profile": pid}
+    job = jobs.start(CALIBRATE, name, run, label=f"Calibrate {p['name']}", live={"profile": pid})
     return job.info(log_since=0)
+
+
+@router.post("/api/sessions/{s}/mocap/profiles/{pid}/calibrate")
+def calibrate_profile(s: str, pid: str, payload: dict = Body(default={})):
+    """Run FreeMoCap's calibration for a profile that isn't calibrated yet (failed, or never run)."""
+    return _start_calibration(require_session(s), pid, bool((payload or {}).get("delete_leftovers")))
 
 
 @router.post("/api/sessions/{s}/mocap/calibrate")
@@ -190,7 +169,7 @@ def calibrate(s: str, payload: dict = Body(...)):
 
     p = _edit(name, make)
     try:
-        return calibrate_profile(s, p["id"], {"delete_leftovers": payload.get("delete_leftovers")})
+        return _start_calibration(name, p["id"], bool(payload.get("delete_leftovers")))
     except HTTPException:
         _edit(name, lambda paths, data: mocap.delete_profile(paths, data, p["id"]))
         raise

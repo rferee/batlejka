@@ -116,20 +116,21 @@ class SessionPaths:
 
 
 def default_mocap() -> dict:
-    return {"profiles": [], "active_profile": None, "calibration": None,
+    return {"profiles": [], "active_profile": None,
             "options": {"processes": None, "blender": False, "blender_exe": None, "params": {}}, "takes": {}}
 
 
 def _migrate_mocap(mocap: dict) -> None:
     """Sessions from before calibration profiles had one ``mocap.calibration``: it becomes
-    the first (active) profile. Pure data — its TOML is copied away lazily, when another
-    calibration of the same take would overwrite it (fmc.mocap)."""
+    the first (active) profile and the old key goes (later versions mirrored the active
+    profile there; nothing reads it now). Pure data — its TOML is copied away lazily, when
+    another calibration of the same take would overwrite it (fmc.mocap)."""
+    old = mocap.pop("calibration", None)
     if isinstance(mocap.get("profiles"), list):
         mocap.setdefault("active_profile", None)
         return
     mocap["profiles"] = []
     mocap["active_profile"] = None
-    old = mocap.get("calibration")
     if not isinstance(old, dict) or not old.get("toml"):
         return
     sq = old.get("square_mm")
@@ -144,7 +145,6 @@ def _migrate_mocap(mocap: dict) -> None:
         "calibrated_with": dict(settings),
     })
     mocap["active_profile"] = "p1"
-    old.update(profile="p1", profile_name=name)
 
 
 def default_export_options() -> dict:
@@ -189,7 +189,6 @@ def _normalize(data: dict, name: str) -> dict:
         merged.update(data.get(key) or {})
         data[key] = merged
     mocap = data["mocap"]
-    mocap.setdefault("calibration", None)
     mocap["options"] = {**default_mocap()["options"], **(mocap.get("options") or {})}
     mocap.setdefault("takes", {})
     _migrate_mocap(mocap)

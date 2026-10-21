@@ -200,7 +200,7 @@ function stepDone(id) {
     case 'sync': return !!st.synced_at;
     case 'review': return (S.data?.takes || []).length > 0;
     case 'export': return !!st.exported_at;
-    case 'calibrate': return (S.data?.mocap?.profiles || []).some((p) => p.status === 'calibrated') || !!S.data?.mocap?.calibration;
+    case 'calibrate': return (S.data?.mocap?.profiles || []).some((p) => p.status === 'calibrated');
     case 'mocap': return Object.values(S.data?.mocap?.takes || {}).some((t) => t.status === 'done');
     default: return false;
   }
