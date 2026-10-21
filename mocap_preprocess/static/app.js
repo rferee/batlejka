@@ -450,11 +450,15 @@ const jobListeners = [];
 /** Call ``fn(jobs, finished)`` after every poll (finished = jobs that just stopped running). */
 export function onJobs(fn) { jobListeners.push(fn); }
 
+let lastPoll = Date.now() / 1000;    // server clock = this clock: same machine
+
 async function pollJobs() {
   clearTimeout(pollTimer);
   let next = 2500;
   try {
     const name = S.name;
+    const since = lastPoll;
+    lastPoll = Date.now() / 1000;
     const list = await GET(name ? `/api/jobs?session=${enc(name)}` : '/api/jobs?global_only=1');
     if (name !== S.name) { pollTimer = setTimeout(pollJobs, 150); return; }
     const finished = [];
@@ -462,7 +466,10 @@ async function pollJobs() {
     let refresh = false;
     for (const j of list) {
       const p = prev.get(j.id);
-      if (p && isActive(p) && !isActive(j)) {
+      // ended since the last poll: seen running before, or (a short job, e.g. the preview build
+      // after a mocap run) started and ended between two polls
+      const ended = !isActive(j) && ((p && isActive(p)) || (!p && j.finished > since));
+      if (ended) {
         refresh = true;
         finished.push(j);
         if (j.status === 'error') toast(`${j.label} failed: ${j.error}`, 'error');
@@ -477,7 +484,7 @@ async function pollJobs() {
     if (list.some(isActive)) next = 600;
     renderJobPill();
     if (S.logOpen) renderJobLog();
-    if (mounted && mounted.onJobs) mounted.onJobs();
+    if (mounted && mounted.onJobs) mounted.onJobs(list, finished);
     for (const fn of jobListeners) {
       try { fn(list, finished); } catch (e) { console.error(e); }
     }

@@ -224,11 +224,13 @@ export const ReviewScreen = {
     this.adopt();
     this.renderAll();
   },
-  onJobs() {
+  onJobs(list, finished = []) {
     this.renderTransportButtons();
     // a calibration, a mocap run or a preview build ended: new previews, new take colours
-    const busy = ['previews', 'mocap_process', 'mocap_calibrate'].some((k) => activeJob(k));
-    if (this.fmcBusy && !busy) this.loadPreviews();
+    // (`finished` also carries jobs that ran between two polls, which the busy flag never sees)
+    const kinds = ['previews', 'mocap_process', 'mocap_calibrate'];
+    const busy = kinds.some((k) => activeJob(k));
+    if ((this.fmcBusy && !busy) || finished.some((j) => kinds.includes(j.kind))) this.loadPreviews();
     this.fmcBusy = busy;
   },
   /** FreeMoCap's annotated videos per take (GET /previews): colours the takes, feeds Preview. */
