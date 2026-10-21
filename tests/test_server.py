@@ -248,3 +248,39 @@ def test_dropped_connection_still_closes_its_socket():
     t._called_connection_lost, t._protocol, t._sock, t._server = False, Protocol(), Sock(), None
     t._call_connection_lost(None)          # used to raise, skipping close()
     assert closed == ["protocol", True] and t._sock is None and t._called_connection_lost
+
+
+def test_dropped_connection_is_detached_from_a_real_server():
+    """The patch must detach the connection the way this Python's asyncio.Server expects
+    (3.12 takes no transport, 3.13+ takes it), or every closed connection raises in the
+    event loop and the server's connection count never drops."""
+    import asyncio
+    import sys
+
+    from mocap_preprocess import aio_fix
+    if sys.platform != "win32":
+        pytest.skip("Windows proactor loop only")
+    assert aio_fix.install()
+    problems = []
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, ctx: problems.append(ctx.get("exception") or ctx.get("message")))
+
+        async def handle(reader, writer):
+            await reader.read(16)
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(b"hi")
+        await w.drain()
+        w.close()
+        await w.wait_closed()
+        await asyncio.sleep(0.2)
+        server.close()
+        await asyncio.wait_for(server.wait_closed(), 3)      # hangs if the connection stayed attached
+
+    asyncio.run(go())      # the proactor loop: Windows' default
+    assert problems == []
