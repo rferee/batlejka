@@ -20,6 +20,7 @@ from .app_state import jobs, require_session, store
 from .jobs import JobConflict
 from .routes_mocap import router as mocap_router
 from .routes_setup import router as setup_router
+from .routes_skeleton import router as skeleton_router
 from .session_store import InvalidName, SessionNotFound, validate_fid, validate_session_name
 
 app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -463,4 +464,5 @@ def index():
 
 app.include_router(setup_router)
 app.include_router(mocap_router)
+app.include_router(skeleton_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
