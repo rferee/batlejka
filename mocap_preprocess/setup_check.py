@@ -261,7 +261,7 @@ def _freemocap_rows(fmc: dict, busy_job: dict | None) -> list[dict]:
         if isinstance(st.get("thigh_mm"), (int, float)):
             nums.append(f"thigh {st['thigh_mm']:.0f} mm")
         if isinstance(st.get("nan_fraction"), (int, float)):
-            nums.append(f"NaN {100 * st['nan_fraction']:.1f}%")
+            nums.append(f"{100 * st['nan_fraction']:.1f}% of points missing")
         if isinstance(st.get("seconds"), (int, float)):
             nums.append(f"{st['seconds']:.0f} s")
         word = "passed" if st.get("passed") else "failed"
