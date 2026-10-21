@@ -59,7 +59,7 @@ class ConsoleLog:
                             scope["method"], scope["path"], code, (time.perf_counter() - t0) * 1000)
 
 
-app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app = FastAPI(title="Batlejka", docs_url="/api/docs", openapi_url="/api/openapi.json")
 app.add_middleware(ConsoleLog)
 
 

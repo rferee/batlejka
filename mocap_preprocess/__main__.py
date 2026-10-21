@@ -20,7 +20,7 @@ log = logging.getLogger("mocap")
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="mocap_preprocess",
-                                     description="Sync and cut multi-camera mocap footage for FreeMoCap.")
+                                     description="Batlejka: sync and cut multi-camera footage, then run FreeMoCap on it.")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--sessions-dir", default="./sessions", help="folder holding <session>/source/")
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
     log.setLevel(logging.INFO)
-    log.info("mocap-preprocess starting (Python %s)", platform.python_version())
+    log.info("Batlejka starting (Python %s)", platform.python_version())
 
     sessions = config.set_sessions_dir(args.sessions_dir)
     found = sorted(d.name for d in sessions.iterdir() if d.is_dir() and not d.name.startswith(".")) if sessions.is_dir() else []

@@ -2,7 +2,7 @@
 fmc_headless.py - run FreeMoCap 1.8.2 calibration and motion capture with no GUI.
 
 This file runs INSIDE the FreeMoCap virtualenv (its own interpreter), never inside
-the mocap-preprocess app. It only uses the stdlib plus what FreeMoCap installs.
+the Batlejka app. It only uses the stdlib plus what FreeMoCap installs.
 
     <fmc-venv>/python -I fmc_headless.py [--fmc-home DIR] [--verbose] <command> ...
 

@@ -27,6 +27,6 @@ if errorlevel 1 (
 )
 
 rem Extra arguments are passed through, e.g.  run.bat --port 9000 --no-browser
-echo Starting mocap-preprocess ...
+echo Starting Batlejka ...
 ".venv\Scripts\python.exe" -m mocap_preprocess %*
 if errorlevel 1 pause
