@@ -60,6 +60,10 @@ export const SyncScreen = {
     if (this.viz) this.viz.destroy();
     this.viz = null;
   },
+  sessionChanged() {
+    this.stopReplay();
+    Object.assign(this, { resyncManual: false, offsetsOpen: {}, lastLive: null, replayPhase: null, shown: false });
+  },
   update() { this.render(); },
   async onJobs() {
     if (activeJob('sync')) this.startLive();

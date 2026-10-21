@@ -729,13 +729,13 @@ export const ReviewScreen = {
     const open = prefs.get('insp', true);
     I.className = `inspector ${open ? '' : 'collapsed'} ${prefs.get('keysOpen', true) ? '' : 'keys-folded'}`;
     if (!open) {
-      I.append(h('button', { class: 'side-expand', title: 'Show inspector', onclick: () => { prefs.set('insp', true); this.renderInspector(); this.grid.layout(); } },
+      I.append(h('button', { class: 'side-expand', title: 'Show inspector', onclick: () => { prefs.set('insp', true); this.renderInspector(); } },
         icon('angles-left'), h('span', null, 'Inspector')));
       return;
     }
     const collapse = h('button', {
       class: 'mini-btn', title: 'Hide inspector', 'aria-label': 'Hide inspector',
-      onclick: () => { prefs.set('insp', false); this.renderInspector(); setTimeout(() => this.grid.layout(), 320); },
+      onclick: () => { prefs.set('insp', false); this.renderInspector(); },   // the grid refits itself as the column animates (ResizeObserver)
     }, icon('angles-right'));
     // small windows on top (what's selected), Hotkeys pinned at the bottom of the column
     const body = h('div', { class: 'insp-body' });
@@ -894,7 +894,7 @@ const MOUSE_HINTS = [
   ['wheel', 'zoom timeline'], ['shift + wheel', 'pan timeline'], ['wheel drag', 'pan timeline'], ['click video', 'full-quality frame'], ['drag in takes row', 'add a take'],
   ['double-click take', 'rename take'], ['click clip bar', 'nudge its offset'], ['click take', 'edit it'],
 ];
-window.addEventListener('beforeunload', () => {
+window.addEventListener('pagehide', () => {
   saveTakes(true);
   saveOpts(true);
   if (isMounted(ReviewScreen)) ReviewScreen.flushOffsets(true);

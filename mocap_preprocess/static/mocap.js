@@ -166,7 +166,10 @@ export const MocapScreen = {
     this.saveOpts();
     this.stopLive();
     this.closeViewer();
-    Object.assign(this, { data: null, name: null, sel: new Set(), selFor: null, opts: null, live: null, error: null, more: false, openTake: null, details: {} });
+    Object.assign(this, {
+      data: null, name: null, sel: new Set(), selFor: null, opts: null, live: null, error: null, more: false,
+      openTake: null, details: {}, detailReq: {},     // detailReq too, or the next session's takes never fetch theirs
+    });
   },
   update() { this.load(); },
   onJobs() { this.tick(); },
@@ -245,19 +248,26 @@ export const MocapScreen = {
     this.optsTimer = setTimeout(() => this.saveOpts(), 500);
     if (rerender) this.render();
   },
-  async saveOpts() {
+  /** Save the settings now; ``beacon`` sends them without waiting (the page is going away). */
+  async saveOpts(beacon = false) {
     clearTimeout(this.optsTimer);
     if (!this.optsDirty || !this.name) return;
     this.optsDirty = false;
     const name = this.name;
+    const url = `/api/sessions/${encodeURIComponent(name)}/mocap/options`;
+    if (beacon) {
+      fetch(url, { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.opts) }).catch(() => {});
+      return;
+    }
     try {
-      const d = await PUT(`/api/sessions/${encodeURIComponent(name)}/mocap/options`, this.opts);
+      const d = await PUT(url, this.opts);
       if (this.data && this.name === name) {
         Object.assign(this.data, { options: d.options, params: d.params });
         this.load();                          // takes go stale (or fresh again) with the settings
       }
     } catch (e) { toast(`Couldn't save mocap options: ${e.message}`, 'error'); }
   },
+  flush() { this.saveOpts(true); },
   async openFolder(dir) {
     try { await POST(sUrl('/reveal'), { what: 'output', sub: dir }); } catch (e) { toast(e.message, 'error'); }
   },
@@ -832,3 +842,4 @@ export const MocapScreen = {
     h('div', { class: 'mc-bar' }, h('div', { style: { width: `${rows.length ? (done.length / rows.length) * 100 : 0}%` } })));
   },
 };
+window.addEventListener('pagehide', () => MocapScreen.flush());   // a settings change made just before closing the tab

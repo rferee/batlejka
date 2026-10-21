@@ -359,4 +359,4 @@ export const CamerasScreen = {
         h('div', { class: 'camfiles' }, files.map((f) => this.fileRow(f, () => 0)))));
   },
 };
-window.addEventListener('beforeunload', () => CamerasScreen.flush());
+window.addEventListener('pagehide', () => CamerasScreen.flush());
