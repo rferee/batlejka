@@ -140,12 +140,13 @@ class Shooter:
 
 
 def goto(page: Page, base: str, session: str, step: str, settle: int = 2500) -> None:
-    page.goto(f"{base}/#/{session}/{step}", wait_until="networkidle")
+    # not "networkidle": while a job runs the page polls every 600 ms and the network never idles
+    page.goto(f"{base}/#/{session}/{step}", wait_until="load")
     page.wait_for_timeout(settle)
 
 
 def capture_screens(page: Page, base: str, session: str, sh: Shooter) -> None:
-    page.goto(f"{base}/#/", wait_until="networkidle")
+    page.goto(f"{base}/#/", wait_until="load")
     page.wait_for_timeout(2500)
     sh.shot(page, "home")
 
@@ -202,7 +203,7 @@ def capture_screens(page: Page, base: str, session: str, sh: Shooter) -> None:
         sh.shot(page, "mocap-take")
 
     # the job drawer in the header
-    page.goto(f"{base}/#/{session}/process", wait_until="networkidle")
+    page.goto(f"{base}/#/{session}/process", wait_until="load")
     page.wait_for_timeout(1500)
     pill = page.locator(".jobpill")
     if pill.count():
