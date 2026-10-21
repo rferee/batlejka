@@ -1,27 +1,30 @@
-// Live sync view: one lane per camera. A clip starts orange at its rough
+// Live sync view: one lane per camera. A clip starts blue at its rough
 // placement (its raw timestamp, then its camera-clock prediction once the clock
-// is solved) and turns green when the audio clicks it into place. Bars ease
+// is solved) and turns green when the audio clicks it into place (orange: only
+// its camera clock or a full search placed it — check those). Bars ease
 // toward their targets, the view zooms with them, and a landing flashes. Below
 // the lanes: per camera pair, the clock votes and the cluster that won.
 
 const FONT = '"JetBrains Mono", ui-monospace, monospace';
 const LABEL_W = 156;
 const RULER_H = 26;
-const LANE_H = 30;
+const LANE_H = 32;
 const LANE_GAP = 6;
 const PARK_W = 96;          // clips without any timestamp wait here (column shown only when needed)
-const VOTE_H = 18;
+const VOTE_H = 20;
 const VLABEL_W = 250;      // pair names in the votes panel
-const VOTE_HEAD = 30;
+const VOTE_HEAD = 22;
 const VOTE_SPAN = 4;        // vote strip shows ±4 s around the consensus
 const PAD = 14;
 const TAU = 0.32;           // easing time constant, s
 const FLASH_MS = 900;
 
 const C = {
-  orange: '#E89768', green: '#97d47d', amber: '#E2B35B', red: '#E56767', blue: '#8880F0',
-  text: '#d3d3d3', white: '#f1f1f1', dim: '#7a7a7a', rule: '#4f4f4f',
-  lane: 'rgba(255,255,255,0.025)', hair: 'rgba(255,255,255,0.06)',
+  orange: '#E89768', green: '#97d47d', red: '#E56767', blue: '#8880F0',
+  rough: '#8880F0',            // not placed by the audio yet
+  text: '#d3d3d3', white: '#f1f1f1', dim: '#8f8f8f', rule: '#4f4f4f',
+  muted: 'rgba(255,255,255,0.6)',
+  lane: 'rgba(255,255,255,0.05)', hair: 'rgba(255,255,255,0.10)', band: 'rgba(255,255,255,0.10)',
 };
 const rgba = (hex, a) => {
   const n = parseInt(hex.slice(1), 16);
@@ -30,15 +33,13 @@ const rgba = (hex, a) => {
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
 const pad2 = (n) => String(n).padStart(2, '0');
 
-function tickLabel(t, step, wall) {
-  if (wall) {
-    const d = new Date(t * 1000);
-    const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-    return step < 60 ? `${hm}:${pad2(d.getSeconds())}` : hm;
-  }
-  const a = Math.abs(t);
-  const s = `${Math.floor(a / 3600)}:${pad2(Math.floor(a / 60) % 60)}:${pad2(Math.floor(a) % 60)}`;
-  return t < 0 ? `-${s}` : s;
+/** Timeline time, 0 being the start of the session: m:ss, h:mm:ss past an hour, tenths when fine. */
+function tickLabel(t, fine = false) {
+  const r = fine ? Math.round(Math.abs(t) * 10) / 10 : Math.floor(Math.abs(t) + 1e-6);
+  const sec = fine ? (r % 60).toFixed(1).padStart(4, '0') : pad2(r % 60);
+  const h = Math.floor(r / 3600);
+  const s = h ? `${h}:${pad2(Math.floor(r / 60) % 60)}:${sec}` : `${Math.floor(r / 60)}:${sec}`;
+  return t < 0 && r > 0 ? `-${s}` : s;
 }
 
 /** What a clip looks like, from its state in the snapshot. */
@@ -46,17 +47,17 @@ function look(c) {
   if (c.pos != null) {
     switch (c.method) {
       case 'reference':
-      case 'audio': return { fill: rgba(C.green, 0.30), stroke: C.green, dash: null, placed: true };
-      case 'search': return { fill: rgba(C.green, 0.12), stroke: C.green, dash: [4, 3], placed: true };
+      case 'audio': return { fill: rgba(C.green, 0.35), stroke: C.green, dash: null, placed: true };
+      case 'search': return { fill: rgba(C.orange, 0.18), stroke: C.orange, dash: [4, 3], placed: true };
       case 'manual': return { fill: rgba(C.blue, 0.22), stroke: C.blue, dash: null, placed: true };
-      case 'metadata': return { fill: rgba(C.amber, 0.16), stroke: rgba(C.amber, 0.85), dash: null, placed: true };
+      case 'metadata': return { fill: rgba(C.orange, 0.35), stroke: C.orange, dash: null, placed: true };
       case 'none': return { fill: rgba(C.red, 0.16), stroke: rgba(C.red, 0.85), dash: null, placed: true };
-      default: return { fill: rgba(C.green, 0.30), stroke: C.green, dash: null, placed: true };
+      default: return { fill: rgba(C.green, 0.35), stroke: C.green, dash: null, placed: true };
     }
   }
   if (c.kept) return { fill: rgba(C.blue, 0.10), stroke: rgba(C.blue, 0.6), dash: [3, 3], placed: false };
-  if (c.pred != null) return { fill: rgba(C.orange, 0.22), stroke: rgba(C.orange, 0.9), dash: null, placed: false };
-  return { fill: rgba(C.orange, 0.07), stroke: rgba(C.orange, 0.55), dash: [3, 3], placed: false };
+  if (c.pred != null) return { fill: rgba(C.rough, 0.22), stroke: rgba(C.rough, 0.9), dash: null, placed: false };
+  return { fill: rgba(C.rough, 0.07), stroke: rgba(C.rough, 0.55), dash: [3, 3], placed: false };
 }
 
 export class SyncViz {
@@ -90,6 +91,8 @@ export class SyncViz {
   /** snapshot: {phase, cams:[{id,name,state,ahead,mode,basis}], clips:[{id,cam,name,dur,raw,pred,pos,method,w,active,kept}], pairs:[{a,b,name,votes,center,support,ok}]} */
   setData(snap, { instant = false } = {}) {
     this.phase = snap.phase;
+    // positions are on the reference clock; a finished sync says where session time 0 sits on it
+    this.origin = typeof snap.frame === 'number' ? -snap.frame : null;
     const lanes = snap.cams.filter((c) => snap.clips.some((x) => x.cam === c.id));
     if (snap.clips.some((x) => !x.cam || !lanes.some((c) => c.id === x.cam))) lanes.push({ id: null, name: 'unassigned', state: 'none' });
     const relayout = lanes.length !== this.cams.length || (snap.pairs || []).length !== this.pairs.length;
@@ -229,10 +232,10 @@ export class SyncViz {
   draw(now) {
     const g = this.ctx;
     g.clearRect(0, 0, this.w, this.h);
-    g.font = `11px ${FONT}`;
+    g.font = `12px ${FONT}`;
     g.textBaseline = 'middle';
-    const wall = this.view[0] > 1e8;
-    this.drawRuler(g, wall);
+    const t0 = this.timeOrigin();
+    this.drawRuler(g, t0);
     const laneOf = new Map(this.cams.map((c, i) => [c.id, i]));
     this.cams.forEach((c, i) => this.drawLane(g, c, i));
     const parked = [];
@@ -250,17 +253,25 @@ export class SyncViz {
     g.restore();
     this.drawParked(g, parked, now);
     if (this.pairs.length) this.drawVotes(g, now);
-    if (this.hover) this.drawHover(g, wall);
+    if (this.hover) this.drawHover(g, t0);
   }
 
-  drawRuler(g, wall) {
+  /** Where session time 0 sits: known once a sync finished, else the earliest clip on the timeline. */
+  timeOrigin() {
+    if (this.origin != null) return this.origin;
+    let lo = Infinity;
+    for (const s of this.clips.values()) if (s.target != null && s.target < lo) lo = s.target;
+    return Number.isFinite(lo) ? lo : 0;
+  }
+
+  drawRuler(g, t0) {
     const span = this.view[1] - this.view[0];
     const step = STEPS.find((s) => (s / span) * this.plotW >= 90) || 86400;
-    g.fillStyle = C.dim;
+    g.fillStyle = C.muted;
     g.strokeStyle = C.hair;
     g.lineWidth = 1;
     g.textAlign = 'left';
-    const first = Math.ceil(this.view[0] / step) * step;
+    const first = t0 + Math.ceil((this.view[0] - t0) / step) * step;
     const bottom = RULER_H + this.cams.length * (LANE_H + LANE_GAP);
     for (let t = first; t <= this.view[1]; t += step) {
       const x = Math.round(this.x(t)) + 0.5;
@@ -269,10 +280,10 @@ export class SyncViz {
       g.moveTo(x, RULER_H - 6);
       g.lineTo(x, bottom);
       g.stroke();
-      g.fillText(tickLabel(t, step, wall), x + 4, RULER_H - 13);
+      g.fillText(tickLabel(t - t0), x + 4, RULER_H - 13);
     }
-    g.fillStyle = C.dim;
-    g.fillText(wall ? 'reference clock' : 'session time', 0, RULER_H - 13);
+    g.fillStyle = C.muted;
+    g.fillText('session time', 0, RULER_H - 13);
   }
 
   drawLane(g, c, i) {
@@ -281,21 +292,21 @@ export class SyncViz {
     g.fillRect(LABEL_W, y, this.plotW, LANE_H);
     g.textAlign = 'left';
     g.fillStyle = C.text;
-    g.font = `500 11px ${FONT}`;
+    g.font = `700 12px ${FONT}`;
     g.fillText(ellipsize(g, c.name, LABEL_W - 12), 0, y + 9);
-    g.font = `10px ${FONT}`;
+    g.font = `12px ${FONT}`;
     let sub = '';
-    let col = C.dim;
+    let col = C.muted;
     if (c.state === 'reference') { sub = 'reference clock'; col = C.green; }
     else if (c.ahead != null && (c.state === 'link' || c.state === 'search')) {
       sub = `${c.ahead > -0.005 ? '+' : '−'}${fmtSecs(Math.abs(c.ahead))} · ${c.mode === 'end' ? 'end' : 'start'}`;
       col = C.green;
-    } else if (c.state === 'median clock' || c.state === 'manual offset') { sub = c.state === 'manual offset' ? 'clock from manual' : 'clock assumed'; col = C.amber; }
-    else if (c.state === 'pending') { sub = 'clock ?'; col = C.orange; }
+    } else if (c.state === 'median clock' || c.state === 'manual offset') { sub = c.state === 'manual offset' ? 'clock from manual' : 'clock assumed'; col = C.orange; }
+    else if (c.state === 'pending') { sub = 'clock ?'; col = C.rough; }
     else if (c.state === 'none') { sub = c.id ? 'no timestamps' : ''; }
     g.fillStyle = col;
-    g.fillText(sub, 0, y + 22);
-    g.font = `11px ${FONT}`;
+    g.fillText(sub, 0, y + 24);
+    g.font = `12px ${FONT}`;
   }
 
   drawClip(g, s, li, now, pxPerS) {
@@ -309,9 +320,9 @@ export class SyncViz {
     if (s.active && s.pos == null && s.pred != null && this.phase === 'align') {
       const wx0 = this.x(s.pred - s.w);
       const wx1 = this.x(s.pred + s.dur + s.w);
-      g.fillStyle = rgba(C.orange, 0.07);
+      g.fillStyle = rgba(C.rough, 0.07);
       g.fillRect(wx0, y - 2, wx1 - wx0, hgt + 4);
-      g.fillStyle = rgba(C.orange, 0.6);
+      g.fillStyle = rgba(C.rough, 0.6);
       g.fillRect(wx0, y - 2, 1, hgt + 4);
       g.fillRect(wx1 - 1, y - 2, 1, hgt + 4);
     }
@@ -322,8 +333,8 @@ export class SyncViz {
       const tail = vpx > 0 ? x0 - len : x1 + len;
       const head = vpx > 0 ? x0 : x1;
       const grad = g.createLinearGradient(tail, 0, head, 0);
-      grad.addColorStop(0, rgba(lk.placed ? C.green : C.orange, 0));
-      grad.addColorStop(1, rgba(lk.placed ? C.green : C.orange, 0.35));
+      grad.addColorStop(0, rgba(lk.placed ? C.green : C.rough, 0));
+      grad.addColorStop(1, rgba(lk.placed ? C.green : C.rough, 0.35));
       g.fillStyle = grad;
       g.fillRect(Math.min(tail, head), y + hgt / 2 - 2, Math.abs(head - tail), 4);
     }
@@ -331,10 +342,10 @@ export class SyncViz {
     let stroke = lk.stroke;
     if (s.active && !lk.placed) {
       const p = 0.5 + 0.5 * Math.sin(now / 160);
-      fill = rgba(C.orange, 0.18 + 0.22 * p);
-      stroke = C.orange;
+      fill = rgba(C.rough, 0.18 + 0.22 * p);
+      stroke = C.rough;
     }
-    if (this.hover && this.hover.id === s.id) fill = lk.placed ? rgba(C.green, 0.45) : rgba(C.orange, 0.4);
+    if (this.hover && this.hover.id === s.id) fill = lk.placed ? rgba(C.green, 0.45) : rgba(C.rough, 0.4);
     g.fillStyle = fill;
     g.fillRect(x0, y, x1 - x0, hgt);
     g.strokeStyle = stroke;
@@ -343,21 +354,21 @@ export class SyncViz {
     g.strokeRect(Math.round(x0) + 0.5, y + 0.5, Math.max(1, Math.round(x1 - x0) - 1), hgt - 1);
     g.setLineDash([]);
     if (x1 - x0 > 70) {
-      g.fillStyle = lk.placed ? C.white : rgba(C.orange, 0.95);
+      g.fillStyle = lk.placed ? C.white : rgba(C.rough, 0.95);
       g.textAlign = 'left';
-      g.font = `10px ${FONT}`;
+      g.font = `700 12px ${FONT}`;
       g.fillText(ellipsize(g, s.name, x1 - x0 - 10), x0 + 5, y + hgt / 2 + 0.5);
-      g.font = `11px ${FONT}`;
+      g.font = `12px ${FONT}`;
     }
     // it clicked: a green flash that opens up and fades
     if (s.flash) {
       const t = (now - s.flash) / FLASH_MS;
       if (t < 1) {
         const grow = 2 + 7 * t;
-        g.strokeStyle = rgba(s.method === 'metadata' ? C.amber : C.green, 0.9 * (1 - t));
+        g.strokeStyle = rgba(s.method === 'metadata' ? C.orange : C.green, 0.9 * (1 - t));
         g.lineWidth = 2;
         g.strokeRect(x0 - grow, y - grow, x1 - x0 + 2 * grow, hgt + 2 * grow);
-        g.fillStyle = rgba(s.method === 'metadata' ? C.amber : C.green, 0.35 * (1 - t));
+        g.fillStyle = rgba(s.method === 'metadata' ? C.orange : C.green, 0.35 * (1 - t));
         g.fillRect(x0, y, x1 - x0, hgt);
         g.lineWidth = 1;
       } else s.flash = 0;
@@ -368,9 +379,9 @@ export class SyncViz {
     const x0 = LABEL_W + this.plotW + 12;
     const w = PARK_W - 16;
     if (!parked.length) return;
-    g.fillStyle = C.dim;
+    g.fillStyle = C.muted;
     g.textAlign = 'left';
-    g.font = `10px ${FONT}`;
+    g.font = `12px ${FONT}`;
     g.fillText('no timestamp', x0, RULER_H - 13);
     const perLane = new Map();
     for (const [s, li] of parked) {
@@ -378,14 +389,14 @@ export class SyncViz {
       perLane.set(li, n + 1);
       const y = this.laneY(li) + 3 + n * 3;
       const p = s.active ? 0.5 + 0.5 * Math.sin(now / 160) : 0;
-      g.fillStyle = rgba(C.orange, 0.08 + 0.2 * p);
+      g.fillStyle = rgba(C.rough, 0.08 + 0.2 * p);
       g.fillRect(x0, y, w, LANE_H - 6 - n * 3);
       g.setLineDash([3, 3]);
-      g.strokeStyle = rgba(C.orange, 0.6);
+      g.strokeStyle = rgba(C.rough, 0.6);
       g.strokeRect(x0 + 0.5, y + 0.5, w - 1, LANE_H - 7 - n * 3);
       g.setLineDash([]);
     }
-    g.font = `11px ${FONT}`;
+    g.font = `12px ${FONT}`;
   }
 
   drawVotes(g, now) {
@@ -393,24 +404,20 @@ export class SyncViz {
     const sx0 = VLABEL_W;
     const sw = Math.max(120, Math.min(this.w - VLABEL_W - 200, 560));
     const X = (d) => sx0 + ((d + VOTE_SPAN) / (2 * VOTE_SPAN)) * sw;
-    g.fillStyle = C.dim;
-    g.font = `10px ${FONT}`;
+    g.fillStyle = C.muted;
+    g.font = `12px ${FONT}`;
     g.textAlign = 'left';
-    g.fillText('clock votes — implied clock difference per match, around the winning cluster', 0, top + 8);
-    g.textAlign = 'center';
-    for (const d of [-VOTE_SPAN, -2, -1, 0, 1, 2, VOTE_SPAN]) {
-      g.fillText(d === 0 ? '0' : `${d > 0 ? '+' : '−'}${Math.abs(d)} s`, X(d), top + 22);
-    }
+    g.fillText(`clock votes — implied clock difference per match, around the winning cluster (−${VOTE_SPAN} s … 0 … +${VOTE_SPAN} s)`, 0, top + 8);
     this.pairs.forEach((p, i) => {
       const y = top + VOTE_HEAD + i * VOTE_H;
       const cy = y + VOTE_H / 2;
-      const col = p.ok === true ? C.green : p.ok === false ? C.dim : C.orange;
+      const col = p.ok === true ? C.green : p.ok === false ? C.dim : C.rough;
       g.textAlign = 'left';
       g.fillStyle = p.ok === false ? C.dim : C.text;
       g.fillText(ellipsize(g, p.name, VLABEL_W - 16), 0, cy);
       g.fillStyle = C.lane;
       g.fillRect(sx0, y + 2, sw, VOTE_H - 4);
-      g.fillStyle = rgba(p.ok === false ? C.dim : col, 0.14);
+      g.fillStyle = C.band;
       g.fillRect(X(-1), y + 2, X(1) - X(-1), VOTE_H - 4);
       g.fillStyle = rgba(col, 0.5);
       g.fillRect(Math.round(X(0)), y + 2, 1, VOTE_H - 4);
@@ -422,14 +429,12 @@ export class SyncViz {
         if (d < -VOTE_SPAN) { left += 1; return; }
         if (d > VOTE_SPAN) { right += 1; return; }
         const age = (now - (seen.at[j] || 0)) / 500;
-        const r = age < 1 ? 2.5 + 3 * (1 - age) : 2.5;
-        g.beginPath();
-        g.arc(X(d), cy + ((j * 7) % 9) - 4, r, 0, Math.PI * 2);
+        const r = age < 1 ? 4 + 3 * (1 - age) : 4;     // half the side of a square mark (8 px at rest)
         g.fillStyle = Math.abs(d) <= 1 ? col : rgba(C.text, 0.45);
-        g.fill();
+        g.fillRect(Math.round(X(d) - r), Math.round(cy + ((j * 7) % 9) - 4 - r), 2 * r, 2 * r);
       });
-      g.font = `10px ${FONT}`;
-      g.fillStyle = C.dim;
+      g.font = `12px ${FONT}`;
+      g.fillStyle = C.muted;
       g.textAlign = 'left';
       if (left) g.fillText(`◂${left}`, sx0 + 4, cy);
       if (right) { g.textAlign = 'right'; g.fillText(`${right}▸`, sx0 + sw - 4, cy); g.textAlign = 'left'; }
@@ -437,16 +442,16 @@ export class SyncViz {
       g.fillStyle = p.ok === false ? C.dim : col;
       g.fillText(tail, sx0 + sw + 8, cy);
     });
-    g.font = `11px ${FONT}`;
+    g.font = `12px ${FONT}`;
   }
 
-  drawHover(g, wall) {
+  drawHover(g, t0) {
     const s = this.clips.get(this.hover.id);
     if (!s || s.x == null) return;
     const state = s.pos != null ? (s.method || 'placed') : s.pred != null ? 'rough: camera clock' : s.raw != null ? 'rough: raw timestamp' : 'no timestamp';
-    const at = tickLabel(s.x, 1, wall);
+    const at = tickLabel(s.x - t0, true);
     const text = `${s.name} · ${at} · ${state}`;
-    g.font = `11px ${FONT}`;
+    g.font = `12px ${FONT}`;
     const tw = g.measureText(text).width + 14;
     let x = this.hover.mx + 12;
     if (x + tw > this.w) x = this.hover.mx - tw - 12;
@@ -525,7 +530,7 @@ export function snapshotFromSession(data, files) {
   });
   const name = (id) => data.cameras.find((c) => c.id === id)?.name || id;
   const pairs = (sync.pairs || []).map((p) => ({ ...p, name: `${name(p.a)} ↔ ${p.b ? name(p.b) : 'placed cameras'}` }));
-  return { phase: data.state.synced_at ? 'done' : 'idle', cams, clips, pairs };
+  return { phase: data.state.synced_at ? 'done' : 'idle', cams, clips, pairs, frame };
 }
 
 /** Replays a finished sync from its snapshot: raw timestamps → camera clocks → audio clicks. */

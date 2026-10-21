@@ -35,7 +35,9 @@ function el(tag, cls, text) {
 
 /**
  * cameras: [{id, name, rotation}]
- * files(cameraId): [{id, rel, start, dur, fps, dw, dh, proxyUrl, thumbUrl}]  (proxyUrl null while building)
+ * files(cameraId): [{id, rel, start, dur, fps, dw, dh, proxyUrl, thumbUrl, preview?, rotation?}]  (proxyUrl null while building)
+ * A preview (FreeMoCap's annotated video of a take) wins over the files under it; it comes
+ * from the exported take, so it's upright already (rotation 0).
  */
 export class Grid {
   constructor(container, opts) {
@@ -142,7 +144,7 @@ export class Grid {
     const dw = (cell.mode === 'video' && cell.vw) || f.dw;
     const dh = (cell.mode === 'video' && cell.vh) || f.dh;
     const media = cell.mode === 'video' ? cell.video : cell.img;
-    applyFit(media, cell.tile, dw, dh, cell.cam.rotation || 0);
+    applyFit(media, cell.tile, dw, dh, f.rotation ?? (cell.cam.rotation || 0));
   }
 
   layout() {
@@ -152,7 +154,8 @@ export class Grid {
   covering(cam, t) {
     let best = null;
     for (const f of this.opts.files(cam.id)) {
-      if (t >= f.start && t < f.start + f.dur && (!best || f.start > best.start)) best = f;
+      if (t >= f.start && t < f.start + f.dur && (!best || !!f.preview > !!best.preview
+        || (!!f.preview === !!best.preview && f.start > best.start))) best = f;
     }
     return best;
   }

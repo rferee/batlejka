@@ -8,7 +8,7 @@ const TAKES_H = 28;
 const GAP = 6;
 const LANE_H = 30;
 const LANE_GAP = 4;
-const PAD_B = 20;
+const PAD_B = 10;
 const EDGE_PX = 6;
 const SNAP_PX = 7;
 const FONT = '"JetBrains Mono", ui-monospace, monospace';
@@ -16,20 +16,24 @@ const FONT = '"JetBrains Mono", ui-monospace, monospace';
 const C = {
   orange: '#E89768',
   text: '#d3d3d3',
-  dim: '#7a7a7a',
+  dim: 'rgba(255,255,255,0.6)',
   rule: '#4f4f4f',
-  lane: 'rgba(255,255,255,0.02)',
+  lane: 'rgba(255,255,255,0)',
+  takesRow: 'rgba(255,255,255,0.05)',
   wave: 'rgba(241,241,241,0.26)',
-  takeFill: 'rgba(232,151,104,0.10)',
-  takeFillSel: 'rgba(232,151,104,0.30)',
-  takeStroke: 'rgba(232,151,104,0.45)',
 };
-// bar colours by sync method: reference/audio normal, full search orange, metadata amber, none red, manual blue
+// take blocks: orange, blue once a calibration used the take, green once FreeMoCap processed it
+const rgba = (hex, a) => `rgba(${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)},${a})`;
+const TAKE = Object.fromEntries(Object.entries({ take: '#E89768', calibration: '#8880F0', mocap: '#97d47d' }).map(([k, hex]) => [k, {
+  line: hex, fill: rgba(hex, 0.10), fillSel: rgba(hex, 0.35), shade: rgba(hex, 0.05), edge: rgba(hex, 0.55),
+}]));
+// bar colours by sync method [fill, stroke, fill under the playhead]: reference/audio neutral,
+// full search and camera clock orange (check them), none red, manual blue
 const METHOD = {
-  reference: ['rgba(255,255,255,0.07)', 'rgba(255,255,255,0.22)', 'rgba(255,255,255,0.15)'],
-  audio: ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0.18)', 'rgba(255,255,255,0.14)'],
-  search: ['rgba(232,151,104,0.12)', 'rgba(232,151,104,0.60)', 'rgba(232,151,104,0.24)'],
-  metadata: ['rgba(226,179,91,0.12)', 'rgba(226,179,91,0.60)', 'rgba(226,179,91,0.24)'],
+  reference: ['rgba(255,255,255,0.10)', '#4f4f4f', 'rgba(255,255,255,0.16)'],
+  audio: ['rgba(255,255,255,0.10)', '#4f4f4f', 'rgba(255,255,255,0.16)'],
+  search: ['rgba(232,151,104,0.12)', 'rgba(232,151,104,0.85)', 'rgba(232,151,104,0.24)'],
+  metadata: ['rgba(232,151,104,0.12)', 'rgba(232,151,104,0.85)', 'rgba(232,151,104,0.24)'],
   none: ['rgba(229,103,103,0.12)', 'rgba(229,103,103,0.60)', 'rgba(229,103,103,0.24)'],
   manual: ['rgba(136,128,240,0.14)', 'rgba(136,128,240,0.65)', 'rgba(136,128,240,0.26)'],
 };
@@ -78,13 +82,11 @@ export class Timeline {
     this.drag = null;
     this.base = document.createElement('canvas');
     this.over = document.createElement('canvas');
-    this.hint = document.createElement('div');
-    this.hint.className = 'tl-hint';
-    this.hint.textContent = 'wheel zoom · shift+wheel pan · drag in takes row to add a take · dbl-click or enter to rename';
-    container.append(this.base, this.over, this.hint);
+    container.append(this.base, this.over);   // mouse hints live in Review's Hotkeys window
     this.bctx = this.base.getContext('2d');
     this.octx = this.over.getContext('2d');
     this.over.addEventListener('pointerdown', (e) => this.onDown(e));
+    this.over.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });   // no autoscroll: the wheel drag pans
     this.over.addEventListener('pointermove', (e) => this.onMove(e));
     this.over.addEventListener('pointerup', (e) => this.onUp(e));
     this.over.addEventListener('pointercancel', (e) => this.onUp(e));
@@ -210,7 +212,7 @@ export class Timeline {
     this.drawLanes(g);
     g.restore();
     // labels column
-    g.font = `11px ${FONT}`;
+    g.font = `12px ${FONT}`;
     g.textBaseline = 'middle';
     g.fillStyle = C.orange;
     g.fillText('takes', 20, RULER_H + TAKES_H / 2);
@@ -245,8 +247,8 @@ export class Timeline {
       g.lineTo(x, RULER_H - (major ? 7 : 3));
     }
     g.stroke();
-    g.font = `10px ${FONT}`;
-    g.fillStyle = C.text;
+    g.font = `12px ${FONT}`;
+    g.fillStyle = C.dim;
     g.textBaseline = 'top';
     for (let t = Math.floor(tA / step) * step; t <= tB; t += step) {
       if (t < -1e-9) continue;
@@ -268,7 +270,7 @@ export class Timeline {
 
   drawTakes(g) {
     const y = RULER_H;
-    g.fillStyle = 'rgba(255,255,255,0.015)';
+    g.fillStyle = C.takesRow;
     g.fillRect(LABEL_W, y, this.w - LABEL_W, TAKES_H);
     g.strokeStyle = 'rgba(255,255,255,0.10)';
     g.beginPath();
@@ -283,11 +285,12 @@ export class Timeline {
       const x1 = this.x(tk.end);
       if (x1 < LABEL_W || x0 > this.w) continue;
       const isSel = sel && sel.kind === 'take' && sel.id === tk.id;
+      const col = TAKE[(this.model.takeKinds && this.model.takeKinds.get(tk.id)) || 'take'];
       if (isSel) {
         // shade the take across all lanes so coverage is easy to judge
-        g.fillStyle = 'rgba(232,151,104,0.05)';
+        g.fillStyle = col.shade;
         g.fillRect(x0, lanesTop - GAP, x1 - x0, lanesBottom - lanesTop + GAP);
-        g.strokeStyle = 'rgba(232,151,104,0.55)';
+        g.strokeStyle = col.edge;
         g.setLineDash([3, 3]);
         g.beginPath();
         g.moveTo(Math.round(x0) + 0.5, lanesTop - GAP);
@@ -297,30 +300,23 @@ export class Timeline {
         g.stroke();
         g.setLineDash([]);
       }
-      g.fillStyle = isSel ? C.takeFillSel : C.takeFill;
+      g.fillStyle = isSel ? col.fillSel : col.fill;
       g.fillRect(x0, y + 3, x1 - x0, TAKES_H - 6);
-      g.strokeStyle = isSel ? C.orange : C.takeStroke;
+      g.strokeStyle = col.line;
       g.lineWidth = 1;
       g.strokeRect(Math.round(x0) + 0.5, y + 3.5, Math.max(1, Math.round(x1 - x0) - 1), TAKES_H - 7);
       if (isSel) {
-        g.fillStyle = C.orange;
+        g.fillStyle = col.line;
         g.fillRect(Math.round(x0), y + 3, 3, TAKES_H - 6);
         g.fillRect(Math.round(x1) - 3, y + 3, 3, TAKES_H - 6);
-      }
-      if (!tk.export) {
-        g.strokeStyle = 'rgba(232,151,104,0.25)';
-        g.beginPath();
-        g.moveTo(x0, y + TAKES_H / 2);
-        g.lineTo(x1, y + TAKES_H / 2);
-        g.stroke();
       }
       if (x1 - x0 > 14) {
         g.save();
         g.beginPath();
         g.rect(x0 + 2, y, x1 - x0 - 4, TAKES_H);
         g.clip();
-        g.font = `bold 11px ${FONT}`;
-        g.fillStyle = isSel ? '#f1f1f1' : C.orange;
+        g.font = `bold 12px ${FONT}`;
+        g.fillStyle = isSel ? '#f1f1f1' : col.line;
         g.textBaseline = 'middle';
         g.fillText(tk.name, Math.max(x0, LABEL_W) + 6, y + TAKES_H / 2 + 0.5);
         g.restore();
@@ -355,12 +351,12 @@ export class Timeline {
           g.beginPath();
           g.rect(x0 + 2, y, x1 - x0 - 4, LANE_H);
           g.clip();
-          g.font = `10px ${FONT}`;
+          g.font = `bold 12px ${FONT}`;
           g.textBaseline = 'top';
           g.fillStyle = 'rgba(13,16,20,0.55)';
           const label = f.label;
           const tx = Math.max(x0, LABEL_W) + 6;
-          g.fillRect(tx - 3, y + 2, g.measureText(label).width + 6, 13);
+          g.fillRect(tx - 3, y + 2, g.measureText(label).width + 6, 15);
           g.fillStyle = '#d3d3d3';
           g.fillText(label, tx, y + 3);
           g.restore();
@@ -428,7 +424,7 @@ export class Timeline {
         g.moveTo(x, RULER_H);
         g.lineTo(x, RULER_H + TAKES_H);
         g.stroke();
-        g.font = `bold 10px ${FONT}`;
+        g.font = `bold 12px ${FONT}`;
         g.fillStyle = C.orange;
         g.textBaseline = 'top';
         g.fillText(lbl, x + 3, RULER_H + 4);
@@ -508,6 +504,13 @@ export class Timeline {
 
   // ---------------------------------------------------------------- pointer
   onDown(e) {
+    if (e.button === 1) {               // hold the wheel and drag: pan, like shift + wheel
+      e.preventDefault();
+      this.over.setPointerCapture(e.pointerId);
+      this.drag = { mode: 'pan', x0: this.local(e).x, t0: this.t0 };
+      this.over.style.cursor = 'grabbing';
+      return;
+    }
     if (e.button !== 0) return;
     const { x, y } = this.local(e);
     if (x < LABEL_W) return;
@@ -542,6 +545,14 @@ export class Timeline {
       return;
     }
     const d = this.drag;
+    if (d.mode === 'pan') {
+      this.userView = true;
+      this.t0 = d.t0 - (x - d.x0) / this.pps;
+      this.clampView();
+      this.drawBase();
+      this.drawOver();
+      return;
+    }
     const t = this.tAt(x);
     if (Math.abs(x - (d.x0 ?? x)) > 3) d.moved = true;
     const fps = this.model.fps || 30;
@@ -578,6 +589,11 @@ export class Timeline {
     this.drag = null;
     if (this.over.hasPointerCapture(e.pointerId)) this.over.releasePointerCapture(e.pointerId);
     if (!d) return;
+    if (d.mode === 'pan') {
+      const { x, y } = this.local(e);
+      this.updateCursor(x, y);
+      return;
+    }
     if (d.mode === 'create') {
       const a = Math.min(d.t0, d.t1);
       const b = Math.max(d.t0, d.t1);
