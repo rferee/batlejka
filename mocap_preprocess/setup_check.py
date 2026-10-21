@@ -11,6 +11,7 @@ it passed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ FFMPEG_INSTALL_HINT = ("Install it with `winget install Gyan.FFmpeg` or `scoop i
                        "or point MOCAP_FFMPEG / MOCAP_FFPROBE at the executables.")
 
 _lock = threading.Lock()
+console = logging.getLogger("mocap.setup")
 _cache: dict | None = None            # the slow part of get_setup(): tools, GPU, versions
 _caps_cache: tuple | None = None      # (mtime, caps) of gpu_probe.json
 
@@ -347,7 +349,10 @@ def get_setup(refresh: bool = False, busy_job: dict | None = None) -> dict:
     global _cache
     with _lock:
         if refresh or _cache is None:
+            t0 = time.perf_counter()
+            console.info("checking the setup: ffmpeg, GPU, git, uv%s...", " (GPU tests again)" if refresh else "")
             _cache = _collect(refresh)
+            console.info("setup checked in %.1f s", time.perf_counter() - t0)
         c = _cache
     env = _env()
     if refresh and busy_job is None and hasattr(env, "check"):

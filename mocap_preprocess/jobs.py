@@ -1,7 +1,9 @@
 """Background job manager (R5): each job runs in its own thread and reports
-progress, a log, and honours cancel requests."""
+progress, a log, and honours cancel requests. The console gets each job's start and end,
+its log lines (info and up) and, for long jobs, a progress line every few seconds."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import traceback
@@ -12,6 +14,9 @@ from typing import Callable
 from .ffmpeg_tools import Cancelled
 
 ACTIVE = ("queued", "running")
+console = logging.getLogger("mocap.jobs")
+LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warn": logging.WARNING, "error": logging.ERROR}
+PROGRESS_EVERY = 10.0     # seconds between a long job's progress lines on the console
 
 
 class JobConflict(RuntimeError):
@@ -38,17 +43,23 @@ class Job:
         self._lock = threading.Lock()
         self.done_event = threading.Event()
         self.live = None   # optional JSON snapshot a job publishes for a live view
+        self._progress_logged = time.time()
 
     # -- used by job functions -------------------------------------------
     def log(self, msg: str, level: str = "info") -> None:
         with self._lock:
             self._seq += 1
             self._log.append({"seq": self._seq, "t": time.time(), "level": level, "msg": str(msg)})
+        console.log(LEVELS.get(level, logging.INFO), "[%s] %s", self.label, msg)
 
     def set_progress(self, fraction: float, message: str | None = None) -> None:
         self.progress = float(min(1.0, max(0.0, fraction)))
         if message is not None:
             self.message = message
+        now = time.time()
+        if now - self._progress_logged >= PROGRESS_EVERY and self.progress < 1.0:
+            self._progress_logged = now
+            console.info("[%s] %d%%%s", self.label, round(self.progress * 100), f"  {self.message}" if self.message else "")
 
     @property
     def cancelled(self) -> bool:
@@ -106,6 +117,8 @@ class JobManager:
     def _run(self, job: Job, fn: Callable[[Job], object]) -> None:
         job.status = "running"
         job.started = time.time()
+        where = f" ({job.session})" if job.session else ""
+        console.info("started: %s%s", job.label, where)
         try:
             job.result = fn(job)
             if job.cancelled:
@@ -125,6 +138,13 @@ class JobManager:
                 job.log(line, "debug")
         finally:
             job.finished = time.time()
+            took = _took(job.finished - job.started)
+            if job.status == "done":
+                console.info("done: %s%s in %s", job.label, where, took)
+            elif job.status == "error":
+                console.error("failed: %s%s after %s: %s", job.label, where, took, job.error)
+            else:
+                console.warning("cancelled: %s%s after %s", job.label, where, took)
             job.done_event.set()
 
     def _prune(self) -> None:
@@ -149,3 +169,7 @@ class JobManager:
         if job is not None and job.status in ACTIVE:
             job.cancel_event.set()
         return job
+
+
+def _took(seconds: float) -> str:
+    return f"{seconds:.1f} s" if seconds < 90 else f"{int(seconds // 60)} min {int(seconds % 60):02d} s"

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -27,8 +29,39 @@ from .session_store import InvalidName, SessionNotFound, validate_fid, validate_
 
 
 aio_fix.install()     # dropped video connections: no tracebacks, no leaked sockets
+console = logging.getLogger("mocap.http")
+
+
+class ConsoleLog:
+    """Changes made from the UI (anything but GET) and server errors, one line each on the
+    console; the steady polling and video streaming stay quiet. Plain ASGI, so responses
+    stream through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        t0 = time.perf_counter()
+        seen = {}
+
+        async def send_status(message):
+            if message["type"] == "http.response.start":
+                seen["status"] = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_status)
+        finally:
+            code = seen.get("status", 500)
+            if scope["method"] not in ("GET", "HEAD") or code >= 500:
+                console.log(logging.INFO if code < 400 else logging.WARNING, "%s %s -> %d (%.0f ms)",
+                            scope["method"], scope["path"], code, (time.perf_counter() - t0) * 1000)
+
 
 app = FastAPI(title="mocap-preprocess", docs_url="/api/docs", openapi_url="/api/openapi.json")
+app.add_middleware(ConsoleLog)
 
 
 # ---------------------------------------------------------------------------

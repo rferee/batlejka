@@ -18,6 +18,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 :install
+echo Checking Python packages ...
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt
 if errorlevel 1 (
     echo pip install failed.
@@ -26,5 +27,6 @@ if errorlevel 1 (
 )
 
 rem Extra arguments are passed through, e.g.  run.bat --port 9000 --no-browser
+echo Starting mocap-preprocess ...
 ".venv\Scripts\python.exe" -m mocap_preprocess %*
 if errorlevel 1 pause
