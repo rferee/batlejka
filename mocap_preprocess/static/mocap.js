@@ -704,6 +704,15 @@ export const MocapScreen = {
     } else if (done && q?.error) row('details', h('span', { class: 'warn' }, q.error));
     const usedProf = info?.calibration?.profile_name || this.profile(t.profile)?.name;
     if (usedProf) row('calibration', usedProf + (done && info?.calibration?.profile_name && info.calibration.profile !== t.profile ? ' (another profile is selected now)' : ''));
+    if (done && info) {
+      const adj = info.calibration_adjustments || [];
+      const scale = (s) => (Math.abs(s[0] - s[1]) < 1e-3 ? `×${+s[0].toFixed(3)}` : `×${+s[0].toFixed(3)} / ×${+s[1].toFixed(3)}`);
+      row('calibration adjustment', adj.length
+        ? h('div', { class: 'col', style: { gap: '2px' } }, adj.map((a) => h('span', null,
+          `${camName(a.camera)}: calibrated at ${a.calibrated[0]}×${a.calibrated[1]}, this take is ${a.video[0]}×${a.video[1]} · lens parameters scaled ${scale(a.scale)}`)))
+        : 'none',
+        'Cameras whose videos in this take have another size than they were calibrated at: their focal length and image centre were scaled to the take\'s resolution before triangulating. A camera that switched from 4K to 1080p mid-session would otherwise give a broken skeleton.');
+    }
     if (done && info?.params) row('settings', this.paramsText(info.params), 'FreeMoCap settings this take was processed with, where they differ from the current defaults.');
     row('frames', `${t.frames ?? '—'} · ${fmtDur(t.duration)}`);
     const camChips = done && q?.camera_detected

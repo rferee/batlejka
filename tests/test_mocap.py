@@ -47,6 +47,7 @@ class FakeRunner:
         self.ncal = 0            # calibrations run (written into each TOML, to tell them apart)
         self.params = None       # the last --params file's contents
         self.fail_calibration = False
+        self.adjusted = []       # what the headless script reports as rescaled per take
 
     def __call__(self, cmd, args=(), job=None, on_event=None, on_tqdm=None, log_text=True):
         args = [str(a) for a in args]
@@ -93,7 +94,7 @@ class FakeRunner:
             (out / f"{d.name}_body_3d_xyz.npy").write_bytes(b"x")
             ev({"type": "take_done", "take": d.name, "path": str(d), "cameras": cams,
                 "subset": len(cams) < 3, "toml": str(d / f"{d.name}_camera_calibration.toml"), "seconds": 1.5,
-                "params": applied})
+                "params": applied, "adjusted": list(self.adjusted)})
         return {"ok": not failed, "failed": failed, "returncode": 0 if not failed else 1, "log": "fake.log"}
 
 
@@ -451,14 +452,19 @@ def test_take_detail_and_blend(fake):
 
     client, fr, paths = fake
     calibrate(client)
+    fr.adjusted = [{"camera": "B_synced", "calibrated": [2160, 3840], "video": [1080, 1920], "scale": [0.5, 0.5]}]
     j = wait(client, client.post(f"/api/sessions/{NAME}/mocap/process", json={"take_ids": ["t2"]}).json())
     assert j["status"] == "done", j
+    info = json.loads((paths.output / "jump" / "mocap_info.json").read_text())
+    assert info["calibration_adjustments"] == fr.adjusted         # kept with the run, shown in Details
+    fr.adjusted = []
     body = np.zeros((10, 33, 3))
     body[:, 13] = [300.0, 0.0, 0.0]          # left elbow 300 mm from the left shoulder (at the origin)
     body[:, 25] = [0.0, 400.0, 0.0]          # left knee 400 mm from the left hip
     body[3, 0] = np.nan                      # one frame without the whole body
     np.save(paths.output / "jump" / "output_data" / "jump_body_3d_xyz.npy", body)
     d = client.get(f"/api/sessions/{NAME}/mocap/takes/t2/detail").json()
+    assert d["info"]["calibration_adjustments"][0]["camera"] == "B_synced"
     q = d["quality"]
     assert q["frames"] == 10 and q["body_tracked_pct"] == 90.0
     assert q["upper_arm_mm"][0] == 300.0 and q["thigh_mm"][0] == 400.0

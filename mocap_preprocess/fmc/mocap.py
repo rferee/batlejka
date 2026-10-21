@@ -780,6 +780,7 @@ def run_process(store, name: str, job, takes: list[dict], processes: int,
                     "calibration": snapshot_calib,
                     "cameras": ev.get("cameras") or tk["cameras"],
                     "subset": bool(ev.get("subset")),
+                    "calibration_adjustments": list(ev.get("adjusted") or []),   # cameras rescaled to this take's video size
                     "toml": ev.get("toml"),
                     "processes": processes,
                     "params": ev.get("params") or params,
