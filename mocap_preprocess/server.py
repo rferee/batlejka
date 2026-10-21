@@ -18,6 +18,7 @@ from . import exporter, grouping, pipeline, previews, syncing
 from . import takes as takes_mod
 from .app_state import jobs, require_session, store
 from .jobs import JobConflict
+from .routes_frames import router as frames_router
 from .routes_mocap import router as mocap_router
 from .routes_previews import router as previews_router
 from .routes_setup import router as setup_router
@@ -485,4 +486,5 @@ app.include_router(setup_router)
 app.include_router(mocap_router)
 app.include_router(skeleton_router)
 app.include_router(previews_router)
+app.include_router(frames_router)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")

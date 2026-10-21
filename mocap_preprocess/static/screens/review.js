@@ -1,4 +1,5 @@
 // Review screen, plus the takes / export-options store it shares with Export.
+import { openFrame } from '../frameview.js';
 import { applyFit, Grid } from '../grid.js';
 import { Timeline } from '../timeline.js';
 import {
@@ -166,7 +167,13 @@ export const ReviewScreen = {
         this.transport,
         h('div', { style: { overflowY: 'auto', maxHeight: '46vh', flexShrink: '0' } }, this.tlEl)),
       this.insp));
-    this.grid = new Grid(this.gridEl, { files: (cid) => (this.gridFiles && this.gridFiles.get(cid)) || [] });
+    this.grid = new Grid(this.gridEl, {
+      files: (cid) => (this.gridFiles && this.gridFiles.get(cid)) || [],
+      onTile: (cam, f, ft) => {      // the frame on screen, full quality, to zoom into
+        if (RV.playing) this.stop();
+        openFrame({ url: f.frameUrl(ft), title: cam.name, sub: `${f.rel.split('/').pop()} · ${fmtTC(f.start + ft, targetFps())}` });
+      },
+    });
     this.timeline = new Timeline(this.tlEl, {
       onScrub: (t) => { if (RV.playing) this.stop(); this.seek(t); },
       onSelect: (sel) => this.select(sel),
@@ -282,6 +289,7 @@ export const ReviewScreen = {
         dw: v.display_width, dh: v.display_height,
         proxyUrl: f.assets.proxy ? `${mediaUrl('proxy', f, 'mp4')}&s=${f.assets.proxy_size || ''}` : null,
         thumbUrl: f.assets.thumb ? mediaUrl('thumb', f, 'jpg') : null,
+        frameUrl: (ft) => sUrl(`/files/${encodeURIComponent(f.id)}/frame?t=${ft.toFixed(4)}`),
       };
       if (!this.gridFiles.has(f.camera)) this.gridFiles.set(f.camera, []);
       this.gridFiles.get(f.camera).push(entry);
@@ -296,6 +304,7 @@ export const ReviewScreen = {
         this.gridFiles.get(cid).push({
           id: `pv:${t.take_id}:${cid}`, rel: `${name} · ${t.kind === 'calibration' ? 'board detection' : 'skeleton'}`,
           start: t.start, dur: t.end - t.start, fps, proxyUrl: c.url, thumbUrl: null, preview: true, rotation: 0,
+          frameUrl: (ft) => sUrl(`/previews/${encodeURIComponent(t.take_id)}/${encodeURIComponent(cid)}/frame?t=${ft.toFixed(4)}`),
         });
       }
     }
@@ -882,7 +891,7 @@ const HOTKEYS = [
   ['home / end', 'jump to start / end'], ['F', 'fit timeline'], ['ctrl + Z', 'undo takes'], ['esc', 'deselect'],
 ];
 const MOUSE_HINTS = [
-  ['wheel', 'zoom timeline'], ['shift + wheel', 'pan timeline'], ['wheel drag', 'pan timeline'], ['drag in takes row', 'add a take'],
+  ['wheel', 'zoom timeline'], ['shift + wheel', 'pan timeline'], ['wheel drag', 'pan timeline'], ['click video', 'full-quality frame'], ['drag in takes row', 'add a take'],
   ['double-click take', 'rename take'], ['click clip bar', 'nudge its offset'], ['click take', 'edit it'],
 ];
 window.addEventListener('beforeunload', () => {

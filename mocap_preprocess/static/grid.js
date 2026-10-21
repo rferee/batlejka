@@ -117,6 +117,10 @@ export class Grid {
     tile.append(video, img, nofoot, building, name, audio, file, frame);
     this.root.append(tile);
     const cell = { cam, tile, video, img, name, audio, file, frame, nofoot, building, cur: null, ready: false, pending: null, mode: 'none' };
+    // a click opens the frame on screen at full quality (opts.onTile)
+    tile.addEventListener('click', () => {
+      if (cell.cur && this.opts.onTile) this.opts.onTile(cell.cam, cell.cur, this.t - cell.cur.start);
+    });
     video.addEventListener('loadedmetadata', () => {
       cell.ready = true;
       cell.vw = video.videoWidth;
@@ -216,6 +220,7 @@ export class Grid {
     cell.cur = f;
     cell.mode = mode;
     cell.nofoot.hidden = !!f;
+    cell.tile.classList.toggle('has-frame', !!(f && this.opts.onTile));
     cell.building.hidden = mode !== 'thumb';
     cell.file.textContent = f ? f.rel.split('/').pop() : '—';
     cell.file.title = f ? f.rel : '';

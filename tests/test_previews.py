@@ -121,3 +121,25 @@ def test_mocap_jobs_queue_a_build_when_they_end(session):
     built = [j for j in jobs._jobs.values() if j.kind == "previews" and j.session == NAME]
     assert built, "no preview build after the mocap job"
     assert built[-1].done_event.wait(60) and built[-1].status == "done"
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    assert data[1:4] == b"PNG"
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
+def test_full_quality_frames(session):
+    client, paths = session
+    # FreeMoCap's own video, full size (the preview is the proxy-sized copy)
+    r = client.get(f"/api/sessions/{NAME}/previews/t2/c1/frame?t=0.5")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert png_size(r.content) == (320, 240)
+    assert client.get(f"/api/sessions/{NAME}/previews/t3/c1/frame?t=0.5").status_code == 404   # never processed
+    # a source file, turned the way the export turns it; a time past its end gives its last frame
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=1", "-c:v", "libx264", paths.source / "clip.mp4")
+    with store.edit(NAME) as d:
+        d["cameras"][0]["rotation"] = 90
+        d["files"] = [{"id": "f_0123456789", "rel": "clip.mp4", "camera": "c0", "probe": {"duration": 1.0}}]
+    r = client.get(f"/api/sessions/{NAME}/files/f_0123456789/frame?t=5")
+    assert r.status_code == 200 and png_size(r.content) == (240, 320)
+    assert client.get(f"/api/sessions/{NAME}/files/f_nope/frame?t=0").status_code == 404
