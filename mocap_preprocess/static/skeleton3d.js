@@ -7,7 +7,7 @@ const GRID_STEP = 500;                 // mm
 const FACE = 11;                       // landmarks 0–10 are the face: hidden in first person
 const SMOOTH = 3;                      // first-person head pose: average of ±3 frames
 const C = {
-  bg: '#12161c', grid: 'rgba(255,255,255,0.08)', bone: '#d3d3d3',   // bg = the card it sits in (--rf-bg-light)
+  bg: '#0d1014', grid: 'rgba(255,255,255,0.08)', bone: '#d3d3d3',   // bg = --rf-bg: the viewport is a dark inset
   x: '#E56767', y: '#97d47d', z: '#8880F0', muted: 'rgba(255,255,255,0.6)',
 };
 // one colour per body part: the left side cool (green arm, sky hand, blue leg), the right warm

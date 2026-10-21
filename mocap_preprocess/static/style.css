@@ -729,7 +729,7 @@ table.sync-clocks td.ellipsis { max-width: 170px; }
 .mc-table tr.mc-tdetail > td { padding: 0; white-space: normal; background: transparent; }
 .mc-table tr.mc-tdetail:hover > td { background: transparent; }
 .mc-tpanel { padding: 16px 16px 16px 44px; display: flex; flex-wrap: wrap; gap: 20px 32px; border-top: 1px solid var(--hairline); }
-.mc-tview { flex: 1 1 380px; min-width: 0; min-height: 280px; display: flex; flex-direction: column; background: #12161c; }
+.mc-tview { flex: 1 1 380px; min-width: 0; min-height: 280px; display: flex; flex-direction: column; }   /* on the panel, like Details; only the viewport is an inset */
 .mc-viewer { flex: 1; min-height: 280px; display: flex; flex-direction: column; }
 .mc-tview-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: rgba(255,255,255,0.6); font-size: 12px; text-align: center; }
 .mc-tview-empty i { font-size: 28px; color: var(--rf-darkgray); }
@@ -758,7 +758,7 @@ table.sync-clocks td.ellipsis { max-width: 170px; }
 /* ---------------------------------------------------------------- skeleton viewer */
 .skel { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .skel-mode { width: 100%; }
-.skel-vp { position: relative; aspect-ratio: 3 / 2; background: var(--rf-bg-light); overflow: hidden; outline: none; cursor: grab; touch-action: none; user-select: none; }   /* one colour with the card and the controls under it */
+.skel-vp { position: relative; aspect-ratio: 3 / 2; background: var(--rf-bg); overflow: hidden; outline: none; cursor: grab; touch-action: none; user-select: none; }   /* a dark inset, like the video tiles */
 .skel-vp.dragging { cursor: grabbing; }
 .skel-vp.first { cursor: crosshair; }
 .skel-vp:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
