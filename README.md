@@ -1,37 +1,92 @@
-# mocap-preprocess
+# Batlejka
 
-A small local web tool that turns a pile of raw multi-camera footage from a home
-mocap session into per-take, frame-synchronized videos that
-[FreeMoCap](https://freemocap.org) can process directly.
+**Sync, cut, capture.**
 
-It is built for this setup: a Fujifilm body that records **one long continuous
-clip** for the whole session, plus iPhones/iPads (Blackmagic Camera) that record
-**one short clip per take**, every take starting with a loud clap. All clips are
-placed on **one session timeline** (camera clocks from timestamps + audio, then
-audio within a small window); you mark the takes,
-and each take is exported as one video per camera, all with the **same frame
-count and frame rate**, correctly rotated. Then it can calibrate the cameras and
-turn the takes into 3D skeletons with a pinned FreeMoCap 1.8.2 that it installs
-and runs headless in its own environment.
+> Batlejka (Belarusian *Батлейка*, from "Bethlehem") is the old Belarusian puppet theatre: a
+> wooden box of two storeys carried from house to house at Christmas, with the nativity
+> played upstairs and the village comedy downstairs, the puppets on rods, the puppeteer
+> hidden behind the box. In this one, the puppet is you.
 
-`source/` is never modified.
+Drop the footage from a multi-camera mocap session into a folder, and Batlejka lines the
+clips up on one timeline, lets you cut them into takes, exports every take as
+frame-matched videos, and runs [FreeMoCap](https://freemocap.org) on them to get 3D
+skeletons. One local web page, from raw phone clips to a `.blend` file.
 
-## Requirements
+![Batlejka: the sync settling, a take playing in Cut Takes, a skeleton in the Mocap step](docs/img/hero.gif)
 
-- Windows (works elsewhere too), Python 3.10+
-- `ffmpeg` and `ffprobe` on `PATH` — or point `MOCAP_FFMPEG` / `MOCAP_FFPROBE` at them
-- Optional: an NVIDIA GPU for `-hwaccel cuda` decoding and `h264_nvenc` encoding
-- A Chromium-based browser (Chrome/Edge) for the UI
-- For the Mocap step: `git` on `PATH` and ~6 GB free disk. FreeMoCap itself (with
-  its own Python 3.12) is installed from the Setup panel; nothing else to install.
+> Batlejka is a wrapper around FreeMoCap, not a replacement for it. The markerless
+> capture, the calibration and the 3D tracking are all FreeMoCap's work; this tool only
+> gets the footage into the shape FreeMoCap wants and runs it for you. I made it for my
+> own animation pipeline, with my own cameras, and share it as is. If it is useful to you,
+> please support the people who made the hard part possible:
+> [freemocap.org](https://freemocap.org) · [github.com/freemocap/freemocap](https://github.com/freemocap/freemocap).
 
-## Running
+## What it does
 
-Double-click **`run.bat`**. It creates `.venv` on first run, installs
-`requirements.txt` (FastAPI, uvicorn, numpy, scipy), starts the server on
-`http://127.0.0.1:8765/` and opens the browser.
+- **Any cameras, no timecode.** Phones, tablets, an action camera, a mirrorless body that
+  records one long clip while the phones record one clip per take: all of them go on one
+  session timeline. Each camera's clock is worked out from its timestamps and audio, then
+  every clip is placed by audio within a small window, so looping music or a repeated
+  clap can't pull a clip a bar off. You can see it happen.
+- **Cut takes like in an editor.** Scrub a multi-camera grid, mark in and out, drag takes
+  on the timeline, rename them, or let it propose takes from the clusters of clips. The
+  keyboard works the way you expect (space, arrows, I / O / N, J / L).
+- **Exports FreeMoCap can read as they are.** One folder per take, one video per camera,
+  all with exactly the same frame count and frame rate, rotated the right way up, black
+  where a camera started late or stopped early.
+- **FreeMoCap, installed and run for you.** The Setup card installs a pinned FreeMoCap
+  into its own environment. Calibrate from a ChArUco take, keep several calibration
+  profiles, tick the takes, press Process, and watch the skeleton in a 3D viewer.
+  Optionally it writes a `.blend` per take.
+- **Everything is a folder.** `sessions/<name>/source/` is never modified. Exports go to
+  `sessions/<name>/output/<take>/`. The session's state is one JSON file under
+  `.preprocess/`; everything else in there (thumbnails, proxies, sync audio) is a cache
+  that is rebuilt when deleted.
 
-Manually:
+## Screens
+
+| | |
+|---|---|
+| ![Sync](docs/img/sync.png) | ![Cut Takes](docs/img/review-take.png) |
+| **Sync.** Clips start where their timestamps put them and click into place as the audio is matched. | **Cut Takes.** A camera grid, a timeline with waveforms, takes on the left, an inspector on the right. |
+| ![Export](docs/img/export.png) | ![Mocap](docs/img/mocap.png) |
+| **Export.** Takes × cameras, with the coverage of every cell, and the output settings. | **Mocap.** FreeMoCap's settings in plain words, a take table, and a skeleton viewer per processed take. |
+
+## Getting started
+
+You need Windows (it runs elsewhere too, but Windows is where it is used), Python 3.12 or
+newer, `ffmpeg` and `ffprobe` on `PATH`, and a Chromium browser (Chrome or Edge). An
+NVIDIA GPU speeds up proxies and exports but is optional. The Mocap step needs `git` and
+about 6 GB of disk for FreeMoCap's environment; the Setup card installs the rest.
+
+1. Double-click **`run.bat`**. The first run creates a virtual environment and installs
+   the Python requirements; then it starts the server on `http://127.0.0.1:8765/` and
+   opens the browser.
+2. On the Home screen, create a session and drop your clips into its `source/` folder
+   (a subfolder per camera is optional). Press **Re-scan**.
+3. Walk the steps in the header: **Process → Cameras → Sync → Cut Takes → Export →
+   Calibrate → Mocap**. A step unlocks once the one before it has done its part.
+
+The **[user guide](docs/README.md)** has a page per step with every setting explained
+where it sits in the UI.
+
+## Known limitations
+
+- Made for one person's setup: a few phones or tablets and one camera, all recording the
+  same room with sound. Cameras without audio are placed by their clocks only.
+- Clips need timestamps (`creation_time`) or audio. A clip with neither goes to the end of
+  the timeline for you to place by hand.
+- The Mocap step is FreeMoCap 1.8.2, headless, with MediaPipe tracking on the CPU: a
+  one-minute take with five cameras takes several minutes.
+- A camera that was not in the calibration can't be processed; a take can use fewer
+  cameras than the calibration, not more.
+- One job of each kind at a time per session, in one browser tab per server. Files that
+  another program has open (FreeMoCap's GUI, a player) can't be re-exported until they
+  are closed.
+- The UI is Chromium only, and the server listens on `127.0.0.1` unless you tell it
+  otherwise. Keep it that way: it serves your footage.
+
+## Running it by hand
 
 ```
 python -m venv .venv
@@ -39,252 +94,36 @@ python -m venv .venv
 .venv\Scripts\python -m mocap_preprocess [--port 8765] [--sessions-dir ./sessions] [--no-browser]
 ```
 
-The server only binds to `127.0.0.1` unless you pass `--host`.
+Set `MOCAP_FFMPEG` / `MOCAP_FFPROBE` if the tools aren't on `PATH`. The Python package
+keeps its working name, `mocap_preprocess`.
 
-## Folder layout
-
-```
-sessions/<name>/
-  source/                  # drop raw clips here (read-only to this tool)
-    DSCF0001.MOV           #   a subfolder per camera is optional: source/<camera>/...
-    IMG_0206.MOV ...
-  output/                  # exports
-    <take>/
-      take_info.json       #   take bounds, fps, per-camera source/offset/sync/rotation/padding
-      synchronized_videos/
-        <camera>_synced.mp4
-      mocap_info.json      #   after the Mocap step: FreeMoCap version, calibration, cameras, video snapshot
-      output_data/ ...     #   FreeMoCap's results (never deleted by a re-export)
-  .preprocess/             # everything derived (safe to delete; it is rebuilt)
-    session.json           #   all state: settings, files, cameras, offsets, takes
-    thumbs/ features/ audio/ wave/ proxies/
-
-.tools/                    # per machine, gitignored: uv's Python 3.12, the FreeMoCap env,
-  freemocap-v1.8.2/        #   its home dir, logs of every run, self-test data, state.json
-  uv-cache/                #   uv's download cache (on the same drive, so installs hardlink)
-  gpu_probe.json           #   GPU decode / NVENC test results
-```
-
-## Workflow
-
-The header has seven steps; a step unlocks once its prerequisites exist.
-The URL (`#/<session>/<step>`) can be bookmarked.
-
-1. **Session** — pick a folder in `sessions/` (or create one) and drop the
-   footage into its `source/`. The **Setup** card at the top checks ffmpeg,
-   the GPU (NVIDIA GPU, a real CUDA decode and NVENC encode test), git, uv and
-   FreeMoCap, and installs / repairs / removes FreeMoCap and runs its self-test.
-   It's folded to one "Setup OK" line once everything passes. A failed GPU test
-   disables that option in Process / Export; new sessions start on `h264_nvenc`
-   when its test passed.
-2. **Process** — the folder is scanned with `ffprobe` as soon as it opens. The
-   target frame rate is prefilled with the most common rate (weighted by
-   duration), and the fps check lists files at a different rate (with the
-   expected drift), variable-frame-rate files and files without audio. These are
-   all conformed on export. *Process source files* builds thumbnails, grouping
-   features, sync audio and waveforms, groups files into cameras, places clips
-   provisionally by creation time, and then builds low-res scrub proxies in the
-   background (short clips first).
-3. **Cameras** — one card per camera. Fix orientation with the rotate buttons
-   (a CSS transform in the browser; pixels are only rotated during export),
-   rename (`cam1`…), exclude, or move a file to another camera / a new one.
-   Changes autosave.
-4. **Sync** — two stages, shown live on the Sync screen: clips start **orange**
-   where their timestamps put them, move when their camera's clock is worked out,
-   and turn **green** when the audio clicks them into place (*Replay* re-runs the
-   animation afterwards; the log, camera clocks and offsets are further down).
-   1. *Camera clocks.* Each camera has its own clock (network-synced phones
-      agree to the second; standalone cameras can be minutes or hours off) and
-      stamps `creation_time` either at the start or at the end of a recording.
-      Clips of different cameras whose timestamps are within 10 min of each other
-      are matched by a full audio search; every match implies a difference between
-      the two cameras' clocks, and per camera pair the largest cluster within ~1 s
-      wins (not the mean). Start vs. end stamping is decided per camera by which
-      reading makes those clusters tightest, and cameras are chained to a
-      reference camera (the one holding the longest file) through the strongest
-      links. A camera with no confident link is attached by a full search against
-      the placed cameras, checked against its own other clips.
-   2. *Fine alignment.* Each clip's prediction (timestamp + its camera's clock
-      offset) is refined by audio only within ±W of it (W = 1.5 s, or 3× the
-      camera's clock spread if larger), so looping music or rhythmic noise can't
-      pull a clip a bar off. Clips that overlap in time form a group and vote
-      together (their correlation curves are summed), so one ambiguous clip can't
-      drift on its own. Results are settled at the full sample rate.
-   - Fallbacks are labelled with their method: a weak peak in the window keeps
-     the predicted placement (*camera clock*, amber); a file without creation
-     time, or of a camera that links to nothing, is placed by a full search
-     (*full search*, orange); a file without audio gets its camera clock's
-     prediction (amber); a file with nothing to go on goes after the end (red).
-   - Checks: clips of one camera never overlap, and files further than W from
-     their camera's clock are flagged (⚠ in *Offsets*, and in the inspector).
-   - Manual offsets are never touched unless you tick *re-sync manual files*.
-5. **Review** — the main screen: camera grid on top, timeline below, the takes
-   on the left, an inspector on the right.
-   - Scrub by clicking/dragging the ruler or the lanes; wheel zooms, Shift+wheel
-     pans, **Fit** shows everything.
-   - Clip bars are coloured by placement: grey = audio/reference, orange = full
-     search (check it), amber = camera clock only (check it), red = unplaced,
-     blue = manual. Click a bar to see its
-     sync score and to nudge its offset (±1 frame, ±10 frames, ±1 s, or type it),
-     or *Re-sync against…* a file you choose (e.g. when looping music matched a
-     bar off).
-   - Takes: drag in the takes row to create one, drag a take to move it, drag its
-     edges to resize, double-click to rename. Or mark **I** / **O** and press
-     **N**, or use **Auto-detect takes** (clusters of short clips; the continuous
-     camera is ignored). Rename the calibration take yourself (e.g.
-     `calibration`).
-   - Keys: Space play/pause · ←/→ one frame · Shift+←/→ one second · I/O set
-     in/out (of the selected take, or pending marks) · N new take from marks ·
-     J / L select the previous / next take (from the selected one, else from the
-     playhead) · K deselect · Enter rename the selected take · Del delete take · Home/End · F fit · Ctrl+Z undo
-     take edits · Esc deselect and clear marks.
-   - The sidebar shows per-take coverage ("4/4 cams", or which camera is missing
-     or will be padded) and the export checkboxes, with *Select all* /
-     *Deselect all*.
-   - A take that spans several files of one camera (it stopped and restarted
-     recording) uses all of them, joined in order with black and silence for the
-     break. The inspector lists the files and how much black goes before,
-     between and after them.
-6. **Export** — a table of takes (rows) × cameras (columns): click a take or a
-   camera to leave it out, *Select all* / *Deselect all* for the takes. Each
-   cell shows that camera's coverage (*full*, the seconds of black it gets, how
-   many files are joined, or *none* when it has no footage and is skipped; hover
-   for the files), and the eye opens the take in Review. Output options and a
-   preview of the folder tree are on the right. **Export** writes one folder
-   per take; every file is checked to have exactly `round(duration × fps)`
-   frames.
-7. **Mocap** — FreeMoCap, headless (unlocks after an export).
-   - *Calibration*: pick the exported calibration take (the first one named
-     `calib…` is preselected), the ChArUco board (7x5 / 5x3), its **square size
-     in mm** (required: the output is in these units) and whether the board lay
-     flat on the floor (then the floor becomes the ground plane). The
-     reprojection error is shown green below 1 px, amber below 2 px, red above.
-   - *Takes*: every other exported take, with its cameras against the
-     calibration. A take may use a subset of the calibrated cameras (e.g. a phone
-     missed it): FreeMoCap 1.8.2 matches cameras by position only, so a
-     calibration with just those cameras, in the take's order, is written into
-     the take folder. A camera the calibration doesn't know is an error.
-     *Process selected* runs all ticked takes in one FreeMoCap process, with
-     per-take progress. Leftover videos from an earlier export that the take no
-     longer lists would be fed to FreeMoCap, so you're asked to delete them first
-     (for the calibration take too).
-   - A processed take turns **stale** when its videos are re-exported or the
-     calibration changes; process it again.
-
-## Bringing exports into FreeMoCap
-
-The Mocap step does this for you. To use your own FreeMoCap instead: each
-`output/<take>/` folder is laid out like a FreeMoCap recording, a
-`synchronized_videos/` folder whose videos all have identical frame counts.
-
-1. Copy the take folders (or just the ones you need) into your FreeMoCap
-   recordings folder (by default `~/freemocap_data/recording_sessions/`), or
-   point FreeMoCap at them directly — a folder with `synchronized_videos/`
-   inside is what it loads as a recording.
-2. Process the calibration take first (the one with the ChArUco board) to get a
-   camera calibration.
-3. Process the other takes with that calibration. The camera order/names are the
-   `<camera>_synced.mp4` file names, so keep camera names stable across takes.
-
-Pick the **flat** layout in *Output › Advanced* if you prefer the videos directly
-in `output/<take>/`.
-
-## Settings worth knowing
-
-- **Target fps** — every export is conformed to it with ffmpeg's `fps` filter
-  (drops/duplicates frames by timestamp), so 60 vs 59.94 or slightly-VFR iPhone
-  clips line up.
-- **Sync sample rate** (8 kHz default), **thresholds** and the **window** (*Process ›
-  Advanced*): a full-search match is accepted when its normalized correlation
-  `score ≥ 0.10` and `ratio ≥ 1.3` (best peak vs. best peak more than 0.1 s
-  away); inside the ±W window a quarter of that score is enough, since the
-  window already rules out the far-away look-alikes. W defaults to 1.5 s.
-- **GPU decode** uses `-hwaccel cuda` for proxies and export (falls back to CPU
-  if it fails). On export the frames then stay on the GPU for the fps
-  conversion, scaling and 10→8-bit conversion (`scale_cuda`); they only come
-  down to system memory for rotation and black padding (no CUDA filters for
-  those in common ffmpeg builds) or for libx264. With the **h264_nvenc** encoder
-  and nothing to rotate or pad, the whole chain runs on the GPU.
-- **NVENC speed**: at 4K the encoder is the bottleneck (decoding runs ~5× faster).
-  On an RTX 3090, 20 s of 4K60 takes 16 s at `p5` (default), 11 s at `p4`, 8 s at
-  `p3`; 1080p output takes 4 s at `p5`.
-- **Files at once** (*Output*, 1 by default, up to 3) runs several ffmpegs side
-  by side, across takes. It only helps when the encoder isn't saturated: a GPU
-  with a single NVENC (e.g. RTX 3090) encodes one file at a time regardless, and
-  libx264 already uses every core. Cancel stops all of them.
-- **Long side** (1920 by default) only ever downscales; *keep* exports at source
-  resolution.
-
-## How it works (short)
-
-- *Grouping*: subfolders win; otherwise files are partitioned by
-  `(make, model, codec, display size, nominal fps)`. Identical devices are split
-  because one camera can't record two overlapping clips, and by comparing each
-  clip's static background (per-pixel median of five tiny grey frames, mildly
-  high-passed so the shared ceiling/floor layout of the room doesn't dominate).
-- *Sync*: pre-emphasis to favour transients such as claps, z-score, FFT
-  cross-correlation (same core as skelly_synchronize), then the correlation is
-  normalized per lag by the overlapping energies so partial overlaps compare
-  fairly. `offset_x = offset_ref + a0_ref + lag/sr − a0_x` accounts for audio
-  streams that don't start at the container start. Clock links and windows are
-  searched on 2 kHz audio (distant microphones agree far better below 1 kHz, and
-  it's 4× cheaper); the final placement is refined at the sync sample rate. A
-  long continuous camera is only searched against one camera pair once the
-  cameras are linked otherwise.
-- *Export*: `ffmpeg -ss <seek> -i SRC -vf "tpad(start),fps,rotate,scale,tpad(stop)"
-  -frames:v N`, audio delayed/padded to match. Rotation filters are applied only
-  here. Several files of one camera: one `fps,scale,rotate,tpad,trim` chain per
-  file (the break before it counted in frames) joined with `concat`; each file's
-  audio is delayed to its exact offset, to the sample.
-
-## FreeMoCap environment
-
-- Pinned: FreeMoCap **v1.8.2** (git commit `a1cd374`, not PyPI and not `main`),
-  Python 3.12 from uv, `opencv-contrib-python==4.8.1.78` and **no**
-  `opencv-python` (4.11 shadows contrib and lacks
-  `cv2.aruco.estimatePoseCharucoBoard`, which crashes calibration). The lock is
-  `mocap_preprocess/fmc/requirements-freemocap.lock`, regenerated from `in.txt`,
-  `excludes.txt` and `overrides.txt` next to it (command in SPEC §12.2). Run the
-  self-test after any change.
-- `mocap_preprocess/fmc/fmc_headless.py` runs inside that env (`check`,
-  `calibrate`, `process`, `selftest`); the app reads its `FMC_EVENT` /
-  `FMC_RESULT` lines and tqdm bars. FreeMoCap's home is pointed at
-  `.tools/freemocap-v1.8.2/home`, so it never touches your FreeMoCap GUI's
-  `freemocap_data`. Every run's raw output is in `.tools/freemocap-v1.8.2/logs/`.
-- Tracking runs on the CPU (MediaPipe); *processes* sets how many cameras are
-  tracked at once (default: cameras, at most CPU cores − 1).
-
-## Development
+## For developers
 
 ```
 pip install -r requirements-dev.txt
-python -m pytest
-python -m pytest -m fmc      # slow, opt-in: FreeMoCap self-test through the API (needs the env)
+python -m pytest                 # ~2 min: builds a synthetic session with ffmpeg and runs everything on it
+python -m pytest -m fmc          # opt-in: FreeMoCap's self-test through the API (needs the env installed)
 ```
 
-The suite builds a synthetic session from the clips in
-`F:\freemocap\calibration` (override with `MOCAP_TEST_CLIPS`) — four fake
-cameras cut from different views, two identical "iPhones", one camera at 30 fps
-instead of 29.97, one clip without audio, a rotated continuous "Fuji", a shared
-soundtrack with claps and white flashes burned into the video — and checks
-grouping, sync accuracy (±1 frame), auto takes, equal frame counts, rotation,
-visual alignment of the flashes across cameras, padding, and HTTP Range support.
-Generate it on its own with `python tests/make_synthetic_session.py`; it lands in
-`tests/_tmp/sessions/synthetic/`, which you can open in the UI with
-`python -m mocap_preprocess --sessions-dir tests/_tmp/sessions`.
-
-Four small `scn_*` sessions (`--scenarios`) test the two-stage sync, each
-requiring every audio clip within one frame of the clips it overlaps:
-`scn_loop` (one 6 s music loop for the whole session; a whole-file search lands
-take 1 on another repeat), `scn_clock` (an action camera 3 min fast that stamps
-the end of each clip), `scn_nocont` (no continuous camera; one take linked to
-nothing), `scn_nometa` (a clip without creation time and a camera without any
-metadata; plus a run with every creation time removed).
-
-Code map: `server.py` (API, media with Range), `pipeline.py` (scan, fps check,
+Code map: `server.py` and `routes_*.py` (the API), `pipeline.py` (scan, fps check,
 process, proxies), `grouping.py`, `syncing.py`, `takes.py`, `exporter.py`,
-`ffmpeg_tools.py`, `session_store.py` (locked, atomic `session.json`), `jobs.py`
-(background jobs), `setup_check.py` + `routes_setup.py` (Setup panel, GPU probes),
-`fmc/` (FreeMoCap: `env.py` install/check, `runner.py` runs `fmc_headless.py`,
-`mocap.py` + `routes_mocap.py` calibration and processing), `static/` (plain
-HTML/CSS/JS, no build step; `setup.js` and `mocap.js` for the new parts).
+`previews.py` (Cut Takes' preview videos), `ffmpeg_tools.py`, `session_store.py`
+(locked, atomic `session.json`), `jobs.py` (background jobs), `setup_check.py` (the Setup
+card and GPU probes), `fmc/` (FreeMoCap: `env.py` install and check, `runner.py` runs
+`fmc_headless.py` inside its env, `mocap.py` calibration profiles and processing),
+`static/` (the UI: plain ES modules, no build step; one module per step under `screens/`,
+canvas views in `timeline.js`, `syncviz.js`, `skeleton3d.js`, `frameview.js`).
+`tools/docshots.py` captures the screenshots and GIFs for the docs with the footage
+pixelated.
+
+## License
+
+Batlejka is licensed under the [GNU AGPL v3](LICENSE). Some bundled pieces are under their
+own licenses (Font Awesome Free, JetBrains Mono); FreeMoCap and ffmpeg run alongside and
+are not part of this repository. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## AI Disclosure
+
+![A pixelated Anthropic mark, a violin, and the word "clod"](docs/img/ai-disclosure.png)
+
+Most of the code was written with the help of Anthropic's Claude Opus and Fable.
