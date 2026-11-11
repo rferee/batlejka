@@ -63,7 +63,7 @@ export const padText = (c) => [
 // RV.session is the session they (and the undo history) belong to; saves go there.
 export const RV = {
   t: 0, playing: false, speed: 1, sel: null, pendingIn: null, pendingOut: null,
-  takes: [], committed: [], undo: [], takesDirty: false, takesSaving: false,
+  takes: [], committed: [], undo: [], takesDirty: false, takesSave: null,
   pendingOffsets: new Map(), opts: null, optsDirty: false, session: null,
 };
 const saveTimers = {};
@@ -76,7 +76,7 @@ export function loadTakes() {
     leaveTakes();
     RV.session = S.name;
   }
-  if (!RV.takesDirty && !RV.takesSaving) {
+  if (!RV.takesDirty && !RV.takesSave) {
     RV.takes = clone(S.data.takes || []);
     RV.committed = clone(RV.takes);
   }
@@ -101,17 +101,28 @@ function queueTakesSave() {
   clearTimeout(saveTimers.takes);
   saveTimers.takes = setTimeout(() => saveTakes(), 400);
 }
+/** Send the takes if they changed, after a save that is still on its way (RV.takesSave).
+ *  Resolves true once the server has them, false if a save failed (it's retried shortly)
+ *  or another session was opened meanwhile. */
 export async function saveTakes(beacon = false) {
   clearTimeout(saveTimers.takes);
   const name = RV.session;    // not S.name: a retry can fire after another session was opened
-  if (!RV.takesDirty || !name) return;
+  // the save on its way has older takes: what follows this one (an export) needs these
+  while (!beacon && RV.takesSave) if (!(await RV.takesSave)) return false;
+  if (RV.session !== name) return false;
+  if (!RV.takesDirty || !name) return true;
   RV.takesDirty = false;
   const body = JSON.stringify(RV.takes);
   if (beacon) {
     fetch(sUrl('/takes', name), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
     return;
   }
-  RV.takesSaving = true;
+  const save = RV.takesSave = putTakes(name, body);
+  const ok = await save;
+  if (RV.takesSave === save) RV.takesSave = null;
+  return ok;
+}
+async function putTakes(name, body) {
   try {
     const d = await api('PUT', sUrl('/takes', name), JSON.parse(body));
     if (S.name === name && S.data) {
@@ -119,6 +130,7 @@ export async function saveTakes(beacon = false) {
       S.data.state = d.state;
       S.data.take_seq = d.take_seq;
     }
+    return true;
   } catch (e) {
     if (RV.session === name) {
       RV.takesDirty = true;
@@ -126,8 +138,7 @@ export async function saveTakes(beacon = false) {
       saveTimers.takes = setTimeout(() => saveTakes(), 3000); // retry
     }
     toast(`Couldn't save takes: ${e.message}`, 'error');
-  } finally {
-    RV.takesSaving = false;
+    return false;
   }
 }
 export function queueOptsSave() {
@@ -156,7 +167,7 @@ export function leaveTakes() {
   saveOpts(true);
   Object.assign(RV, {
     t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [],
-    takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined, session: null,
+    takesDirty: false, takesSave: null, opts: null, optsDirty: false, syncedAt: undefined, session: null,
   });
 }
 
@@ -614,7 +625,7 @@ export const ReviewScreen = {
       if (!ok) return;
     }
     try {
-      await saveTakes();
+      if (!(await saveTakes())) return;  // a save landing after the auto takes would undo them
       if (S.name !== name) return;     // another session was opened meanwhile: not its takes to replace
       const d = await POST(sUrl('/takes/auto'), { replace: true });
       if (S.name !== name) return;

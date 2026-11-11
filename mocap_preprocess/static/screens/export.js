@@ -230,7 +230,7 @@ export const ExportScreen = {
     }
   },
   async exportNow() {
-    await saveTakes();
+    if (!(await saveTakes())) return;    // the export takes the take ranges from the session
     await saveOpts();
     const takeIds = RV.takes.filter((t) => t.export).map((t) => t.id);
     const job = await startJob('/export', { take_ids: takeIds, camera_ids: exportCams(), options: RV.opts });
