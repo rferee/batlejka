@@ -6,11 +6,13 @@ from fastapi import APIRouter, HTTPException
 
 from . import setup_check
 from .app_state import jobs
-from .fmc import env
+from .fmc import env, mocap
+from .jobs import ACTIVE
 
 router = APIRouter()
 
 FREEMOCAP_ACTIONS = ("install", "repair", "remove", "selftest")
+CHANGES_ENV = ("install", "repair", "remove")      # they rewrite or delete the env a mocap run uses
 
 
 def _busy() -> dict | None:
@@ -32,6 +34,9 @@ def freemocap_action(action: str):
         raise HTTPException(503, f"FreeMoCap {action} isn't available in this build")
     if action == "selftest" and not env.ready():
         raise HTTPException(409, "FreeMoCap isn't ready — install or repair it first")
+    if action in CHANGES_ENV and any(j.status in ACTIVE and j.kind in (mocap.JOB_CALIBRATE, mocap.JOB_PROCESS)
+                                     for j in jobs.list()):
+        raise HTTPException(409, "FreeMoCap is in use by a calibration or processing run — wait or cancel it")
     fn, label = entry
     job = jobs.start("setup", None, fn, label=label)   # JobConflict → 409 while another setup job runs
     return job.info(log_since=0)

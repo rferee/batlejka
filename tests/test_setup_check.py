@@ -176,3 +176,29 @@ def test_freemocap_actions(monkeypatch, client):
         assert any(j["kind"] == "setup" for j in jobs)
     finally:
         release.set()
+
+
+def test_freemocap_env_is_not_changed_while_a_mocap_run_uses_it(monkeypatch, client):
+    """Repair and remove delete the env, install rewrites it: not while a calibration or
+    mocap run (in any session) is running FreeMoCap from it. The self-test only reads it."""
+    from conftest import wait_job
+    from mocap_preprocess.app_state import jobs
+    from mocap_preprocess.fmc import mocap
+
+    fake_machine(monkeypatch)
+    ran = []
+    monkeypatch.setattr(env, "ACTIONS", {a: (lambda job, a=a: ran.append(a), a) for a in ("install", "repair", "remove", "selftest")})
+    for kind in (mocap.JOB_PROCESS, mocap.JOB_CALIBRATE):
+        release = threading.Event()
+        job = jobs.start(kind, "some-session", lambda j: release.wait(10))
+        try:
+            for action in ("install", "repair", "remove"):
+                r = client.post(f"/api/setup/freemocap/{action}")
+                assert r.status_code == 409 and "in use" in r.json()["detail"], (kind, action, r.text)
+            wait_job(client.post("/api/setup/freemocap/selftest").json()["id"], 10)
+        finally:
+            release.set()
+            wait_job(job.id, 10)
+    assert ran == ["selftest", "selftest"]
+    wait_job(client.post("/api/setup/freemocap/remove").json()["id"], 10)    # nothing running any more
+    assert ran[-1] == "remove"
