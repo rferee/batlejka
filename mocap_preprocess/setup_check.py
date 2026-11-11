@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -22,6 +21,7 @@ from pathlib import Path
 
 from . import config
 from .fmc import env
+from .session_store import write_json_atomic
 
 FFMPEG_INSTALL_HINT = ("Install it with `winget install Gyan.FFmpeg` or `scoop install ffmpeg` and restart, "
                        "or point MOCAP_FFMPEG / MOCAP_FFPROBE at the executables.")
@@ -164,12 +164,7 @@ def gpu_probe(ffm: dict, gpu: dict | None, refresh: bool = False) -> dict:
     if cached and cached.get("key") == key and "decode" in cached and "nvenc" in cached:
         return cached
     result = run_gpu_probe(ffm, gpu)
-    path = probe_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, indent=1)
-    os.replace(tmp, path)
+    write_json_atomic(probe_file(), result)
     return result
 
 

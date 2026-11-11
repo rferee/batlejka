@@ -39,7 +39,7 @@ from scipy import signal
 from . import ffmpeg_tools as ff
 from .jobs import Job
 from .session_store import video_files
-from .session_store import SessionStore, now
+from .session_store import SessionStore, now, save_npy_atomic
 
 PRE_EMPHASIS = 0.97
 EXCLUDE_S = 0.1          # ratio ignores peaks within ±0.1 s of the best one
@@ -312,11 +312,8 @@ def load_audio(paths, f: dict, sr: int) -> np.ndarray:
     p = paths.audio_npy(f["id"], sr)
     if not p.exists():
         samples = ff.extract_audio(paths.source_file(f["rel"]), sr)
-        tmp = p.with_name(p.stem + ".tmp.npy")
         paths.ensure()
-        with open(tmp, "wb") as fh:
-            np.save(fh, samples)
-        ff.replace_with_retry(tmp, p)
+        save_npy_atomic(p, samples)
     return np.load(p)
 
 

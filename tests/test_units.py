@@ -167,6 +167,46 @@ def test_scan_keeps_the_session_when_source_is_missing_or_unreadable(tmp_path, m
         config.set_sessions_dir(prev)
 
 
+def test_two_jobs_writing_the_same_audio_cache_both_succeed(tmp_path, monkeypatch):
+    """Process and Sync can both extract a file's missing audio at once: each writes a temp
+    file of its own, so neither replace finds the other's already moved away."""
+    import os
+    import threading
+
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path / "sessions")
+        paths = SessionStore().create("s")
+        samples = np.arange(16000, dtype=np.float32)
+        monkeypatch.setattr(syncing.ff, "extract_audio", lambda src, sr: samples)
+        both_written = threading.Barrier(2)
+        real_replace = os.replace
+
+        def replace(src, dst):                      # both temp files are written before either moves
+            both_written.wait(10)
+            real_replace(src, dst)
+        monkeypatch.setattr(os, "replace", replace)
+        f = {"id": file_id("a.mov"), "rel": "a.mov"}
+        got, errors = [], []
+
+        def load():
+            try:
+                got.append(syncing.load_audio(paths, f, 16000))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+        threads = [threading.Thread(target=load) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        assert not errors and len(got) == 2 and all(np.array_equal(x, samples) for x in got)
+        assert [p.name for p in paths.audio.iterdir()] == [f"{f['id']}_16000.npy"]   # no temp file left
+    finally:
+        config.set_sessions_dir(prev)
+
+
 @pytest.mark.parametrize("given,expected", [
     ({"layout": "x", "encoder": "av1", "nvenc_preset": "p9"}, {"layout": "freemocap", "encoder": "libx264", "nvenc_preset": "p5"}),
     ({"crf": "x"}, {"crf": 17}), ({"crf": 99}, {"crf": 51}), ({"crf": -3}, {"crf": 0}),

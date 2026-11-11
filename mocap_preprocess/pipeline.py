@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,7 +16,7 @@ from . import config
 from . import ffmpeg_tools as ff
 from . import grouping, syncing
 from .jobs import Job
-from .session_store import SessionStore, file_id, now, video_files
+from .session_store import SessionStore, file_id, now, save_npy_atomic, video_files
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +245,6 @@ def fps_check(data: dict) -> dict:
 
 FEATURE_HIGHPASS_SIGMA = 3.0
 
-def _save_npy(path: Path, arr: np.ndarray) -> None:
-    tmp = path.with_name(path.stem + ".tmp.npy")
-    with open(tmp, "wb") as fh:
-        np.save(fh, arr)
-    ff.replace_with_retry(tmp, path)
-
-
 def write_waveform(samples: np.ndarray, sr: int, a0: float, path: Path) -> None:
     """Peak |amplitude| per 20 ms bin, normalized to 0–255."""
     b = max(1, int(round(sr * config.WAVE_BIN_SECONDS)))
@@ -262,10 +256,14 @@ def write_waveform(samples: np.ndarray, sr: int, a0: float, path: Path) -> None:
     top = float(peaks.max()) if len(peaks) else 0.0
     q = np.round(peaks / top * 255).astype(np.uint8) if top > 0 else np.zeros(len(peaks), np.uint8)
     payload = {"bin": b / sr, "start": a0, "duration": len(samples) / sr, "peaks": q.tolist()}
-    tmp = path.with_name(path.stem + ".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, separators=(",", ":"))
-    ff.replace_with_retry(tmp, path)
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.json")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, separators=(",", ":"))
+        ff.replace_with_retry(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def process_file(paths, f: dict, sr: int, job: Job | None) -> dict:
@@ -293,7 +291,7 @@ def process_file(paths, f: dict, sr: int, job: Job | None) -> dict:
             med = np.median(np.stack(frames), axis=0)
             hp = med - ndimage.gaussian_filter(med, FEATURE_HIGHPASS_SIGMA, mode="nearest")
             z = (hp - hp.mean()) / (hp.std() + 1e-6)
-            _save_npy(feat, z.astype(np.float32))
+            save_npy_atomic(feat, z.astype(np.float32))
     assets["features"] = feat.exists()
     if job:
         job.check_cancel()
@@ -303,7 +301,7 @@ def process_file(paths, f: dict, sr: int, job: Job | None) -> dict:
         samples = None
         if not a.exists():
             samples = ff.extract_audio(src, sr)
-            _save_npy(a, samples)
+            save_npy_atomic(a, samples)
         assets["audio"] = True
         wave = paths.wave_json(fid)
         if not wave.exists():

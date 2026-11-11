@@ -12,6 +12,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+import numpy as np
+
 from . import config
 from .ffmpeg_tools import replace_with_retry
 
@@ -227,6 +229,20 @@ def write_json_atomic(path: Path, data) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     replace_with_retry(tmp, path)
+
+
+def save_npy_atomic(path: Path, arr) -> None:
+    """``np.save`` through a temp file of this thread's own: Process and Sync are different
+    jobs, so both can write the same missing cache file at once."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.npy")
+    try:
+        with open(tmp, "wb") as fh:     # a file handle: np.save adds no second .npy
+            np.save(fh, arr)
+        replace_with_retry(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class SessionStore:
