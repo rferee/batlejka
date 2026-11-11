@@ -18,6 +18,17 @@ from . import config
 log = logging.getLogger("mocap")
 
 
+def browser_url(host: str, port: int) -> str:
+    """Where the UI is reached: loopback for a wildcard bind, IPv6 addresses in brackets."""
+    if host in ("", "0.0.0.0"):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"        # asyncio makes an IPv6 listening socket IPv6-only: nothing answers on 127.0.0.1
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}/"
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="mocap_preprocess",
                                      description="Batlejka: sync and cut multi-camera footage, then run FreeMoCap on it.")
@@ -51,7 +62,7 @@ def main(argv: list[str] | None = None) -> None:
     from .server import app
     log.info("server loaded in %.1f s, starting on port %d...", time.perf_counter() - t0, args.port)
 
-    url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}/"
+    url = browser_url(args.host, args.port)
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning",
                                            access_log=False, log_config=None))
 

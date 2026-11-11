@@ -411,3 +411,16 @@ def test_metadata_fallback_uses_same_camera_clock():
     by_id = {f["id"]: f for f in files}
     off, via = syncing.metadata_offset(by_id["f"], by_id, {"g": 5.0, "h": 100.0})
     assert off == pytest.approx(35.0) and via == "camera clock"
+
+
+# ------------------------------------------------------------------ CLI
+
+@pytest.mark.parametrize("host,expected", [
+    ("127.0.0.1", "http://127.0.0.1:8765/"), ("localhost", "http://localhost:8765/"),
+    ("0.0.0.0", "http://127.0.0.1:8765/"), ("", "http://127.0.0.1:8765/"),
+    ("::", "http://[::1]:8765/"),     # an IPv6 wildcard socket doesn't take IPv4
+    ("::1", "http://[::1]:8765/"), ("fd00::5", "http://[fd00::5]:8765/"),
+])
+def test_browser_url(host, expected):
+    from mocap_preprocess.__main__ import browser_url
+    assert browser_url(host, 8765) == expected
