@@ -307,6 +307,26 @@ def test_export_and_freemocap_dont_overlap_on_a_take(fake, monkeypatch):
     assert calibrate(client)["status"] == "done"
 
 
+def test_new_profile_isnt_kept_while_a_calibration_runs(fake):
+    """A second New profile run while one calibrates (double click, second tab) is a 409
+    from the job manager, and the form's profile goes again like for any other refusal."""
+    from mocap_preprocess.app_state import jobs
+
+    client, _, _ = fake
+    release = threading.Event()
+    busy = jobs.start(mocap.JOB_CALIBRATE, NAME, lambda j: release.wait(10))
+    try:
+        r = client.post(f"/api/sessions/{NAME}/mocap/calibrate",
+                        json={"take_id": "t1", "board": "7x5", "square_mm": 40, "groundplane": False})
+        assert r.status_code == 409 and "already running" in r.json()["detail"], r.text
+        assert client.get(f"/api/sessions/{NAME}/mocap").json()["profiles"] == []
+    finally:
+        release.set()
+        wait_job(busy.id, 10)
+    assert calibrate(client)["status"] == "done"
+    assert [p["name"] for p in client.get(f"/api/sessions/{NAME}/mocap").json()["profiles"]] == ["7x5-39mm"]
+
+
 def test_process_writes_mocap_info_and_goes_stale(fake):
     client, fr, paths = fake
     calibrate(client)

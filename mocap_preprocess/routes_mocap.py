@@ -174,7 +174,7 @@ def calibrate(s: str, payload: dict = Body(...)):
     p = _edit(name, make)
     try:
         return _start_calibration(name, p["id"], bool(payload.get("delete_leftovers")))
-    except HTTPException:
+    except Exception:       # HTTPException, JobConflict (a calibration already runs), anything else
         _edit(name, lambda paths, data: mocap.delete_profile(paths, data, p["id"]))
         raise
 
