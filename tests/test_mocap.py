@@ -187,9 +187,18 @@ def test_new_profile_form_calibrates_under_its_name(fake):
     assert [(p["name"], p["status"], p["board"]) for p in v["profiles"]] == [("floor-5x3", "calibrated", "5x3")]
     r = client.post(f"/api/sessions/{NAME}/mocap/calibrate", json=body)           # that name is taken
     assert r.status_code == 400 and "already exists" in r.text
+    r = client.post(f"/api/sessions/{NAME}/mocap/calibrate", json={**body, "name": "Floor 5X3"})
+    assert r.status_code == 400 and "'floor-5x3' already exists" in r.text       # in any case: same TOML on Windows
     r = client.post(f"/api/sessions/{NAME}/mocap/calibrate", json={**body, "name": "walk", "take_id": "t3"})
     assert r.status_code == 409                                                   # leftovers: nothing kept
     assert len(client.get(f"/api/sessions/{NAME}/mocap").json()["profiles"]) == 1
+
+
+def test_unique_name_ignores_case():
+    data = {"mocap": {"profiles": [{"id": "p1", "name": "Board"}, {"id": "p2", "name": "board-2"}]}}
+    assert mocap.unique_name(data, "board") == "board-3"
+    assert mocap.unique_name(data, "BOARD-2", exclude="p2") == "BOARD-2"
+    assert mocap.unique_name(data, "floor") == "floor"
 
 
 def test_take_folder_without_take_info_still_listed(fake):

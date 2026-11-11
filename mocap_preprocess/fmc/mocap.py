@@ -172,9 +172,11 @@ def clean_name(name) -> str:
 
 
 def unique_name(data: dict, base: str, exclude=None) -> str:
-    names = {p["name"] for p in profiles(data) if p.get("id") != exclude}
+    # case-insensitively: the name is also the file name of its calibration, and on Windows
+    # (and macOS) 'Board' and 'board' would share one output/calibrations/ TOML
+    names = {p["name"].casefold() for p in profiles(data) if p.get("id") != exclude}
     n, i = base, 2
-    while n in names:
+    while n.casefold() in names:
         n = f"{base}-{i}"
         i += 1
     return n
@@ -215,8 +217,9 @@ def _check_settings(paths, data: dict, patch: dict) -> dict:
 
 def create_profile(paths, data: dict, payload: dict) -> dict:
     name = clean_name(payload.get("name"))
-    if any(p["name"] == name for p in profiles(data)):
-        raise MocapError(f"a profile named {name!r} already exists")
+    same = next((p for p in profiles(data) if p["name"].casefold() == name.casefold()), None)   # see unique_name
+    if same is not None:
+        raise MocapError(f"a profile named {same['name']!r} already exists")
     patch = dict(payload)
     if not patch.get("take_id"):
         patch["take_id"] = suggested_take(exported_takes(paths, data)) or None
