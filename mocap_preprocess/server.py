@@ -524,4 +524,6 @@ app.include_router(mocap_router)
 app.include_router(skeleton_router)
 app.include_router(previews_router)
 app.include_router(frames_router)
-app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+# follow_symlink: the lookup uses abspath (no filesystem I/O) instead of realpath, so a UNC
+# path in a request can't make Windows connect out and send its NTLM hash (GHSA-wqp7-x3pw-xc5r)
+app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR), follow_symlink=True), name="static")

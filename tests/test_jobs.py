@@ -2,6 +2,7 @@
 the session / global listing, and the history cap."""
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -154,6 +155,20 @@ def test_host_check_follows_the_bind_address(client, monkeypatch):
     assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
     assert client.post("/api/jobs/nope/cancel", headers={"Host": "pc.lan:8765",
                                                          "Origin": "http://evil.example"}).status_code == 403
+
+
+def test_static_files_never_resolve_the_request_path(client, monkeypatch):
+    """realpath on a request path would let \\\\host\\share make Windows connect out (and send
+    its NTLM hash); the static mount must only compare paths, never touch the filesystem first."""
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/%2e%2e/server.py").status_code == 404
+    assert client.get("/static/..%2Fserver.py").status_code == 404
+
+    def boom(*a, **kw):
+        raise AssertionError("realpath called on a static request")
+
+    monkeypatch.setattr(os.path, "realpath", boom)
+    assert client.get("/static/style.css").status_code == 200
 
 
 def test_the_ui_refuses_to_be_framed(client):
