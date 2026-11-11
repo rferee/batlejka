@@ -330,6 +330,47 @@ def test_options(fake):
     assert store.load(NAME)["mocap"]["options"]["blender"] is True
 
 
+def test_blender_path_is_checked_before_processing(fake, tmp_path, monkeypatch):
+    """FreeMoCap runs whatever --blender-exe names: only a program on this computer gets there."""
+    client, fr, _ = fake
+    calibrate(client)
+    url = f"/api/sessions/{NAME}/mocap"
+
+    def process_with(exe, blender=True):
+        client.put(url + "/options", json={"blender": blender, "blender_exe": exe})
+        return client.post(url + "/process", json={"take_ids": ["t2"]})
+
+    n = len(fr.calls)
+    for unc in ("//evil/share/b.exe", "\\\\evil\\share\\b.exe", "\\/evil/share/b.exe", "\\\\?\\UNC\\evil\\share\\b.exe"):
+        r = process_with(unc)
+        assert r.status_code == 400 and "network path" in r.json()["detail"], unc
+    for missing in (str(tmp_path / "nope" / "blender.exe"), "\\\\?\\C:\\nope\\blender.exe"):   # the 2nd: a local drive
+        r = process_with(missing)
+        assert r.status_code == 400 and "Blender not found" in r.json()["detail"], missing
+    assert len(fr.calls) == n                                       # nothing ran
+
+    exe = tmp_path / "blender.exe"
+    exe.write_bytes(b"")
+    exe.chmod(0o755)
+    j = wait(client, process_with(str(exe)).json())
+    assert j["status"] == "done", j
+    args = fr.calls[-1][1]
+    assert "--blender" in args and args[args.index("--blender-exe") + 1] == str(exe)
+
+    monkeypatch.setenv("PATH", str(tmp_path))                       # a bare name is looked up on PATH
+    j = wait(client, process_with("blender.exe").json())
+    args = fr.calls[-1][1]
+    assert j["status"] == "done" and Path(args[args.index("--blender-exe") + 1]) == exe
+
+    monkeypatch.chdir(tmp_path.parent)                               # relative to here, made absolute for FreeMoCap
+    j = wait(client, process_with(str(Path(tmp_path.name) / "blender.exe")).json())
+    args = fr.calls[-1][1]
+    assert j["status"] == "done" and args[args.index("--blender-exe") + 1] == str(exe)
+
+    j = wait(client, process_with("//evil/share/b.exe", blender=False).json())    # unused: not checked
+    assert j["status"] == "done" and "--blender-exe" not in fr.calls[-1][1]
+
+
 def test_read_toml_cameras_sorted(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text(toml_text(["x", "y"]).replace("[cam_0]", "[cam_9]").replace("[cam_1]", "[cam_0]"))

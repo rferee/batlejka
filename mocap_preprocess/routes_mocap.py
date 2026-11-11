@@ -1,6 +1,10 @@
 """/api/sessions/{s}/mocap...: FreeMoCap calibration profiles and processing of exported takes."""
 from __future__ import annotations
 
+import re
+import shutil
+from pathlib import Path
+
 from fastapi import APIRouter, Body, HTTPException
 
 from . import config
@@ -209,6 +213,27 @@ def open_blend(s: str, tid: str):
 # ---------------------------------------------------------------------------
 # process
 
+_LOCAL_DEVICE_PATH = re.compile(r"^\\\\[?.]\\[A-Za-z]:\\")     # \\?\C:\... and \\.\C:\... are a local drive
+
+
+def _blender_exe(exe: str | None) -> str | None:
+    """The Blender FreeMoCap will run, checked to be a program on this computer: a bare name
+    is looked up on PATH. None (FreeMoCap finds Blender itself) passes as it is."""
+    if not exe:
+        return None
+    exe = str(exe)
+    if exe[:1] in ("\\", "/") and exe[1:2] in ("\\", "/") and not _LOCAL_DEVICE_PATH.match(exe):
+        # a network path: checking it would already connect out (and send the Windows login)
+        raise HTTPException(400, f"Blender must be on this computer, not a network path: {exe}")
+    if Path(exe).is_absolute():
+        found = exe if Path(exe).is_file() else None
+    else:
+        found = shutil.which(exe)
+    if not found:
+        raise HTTPException(400, f"Blender not found at {exe} — fix the Blender path or leave it empty")
+    return str(Path(found).absolute())     # FreeMoCap runs in its own folder: no relative path from here
+
+
 @router.post("/api/sessions/{s}/mocap/process")
 def process(s: str, payload: dict = Body(...)):
     name = require_session(s)
@@ -261,11 +286,12 @@ def process(s: str, payload: dict = Body(...)):
 
     opts = data["mocap"]["options"]
     processes = opts.get("processes") or mocap.default_processes(max(len(t["cameras"]) for t in takes))
+    blender_exe = _blender_exe(opts.get("blender_exe")) if opts.get("blender") else None
 
     def run(job):
         try:
             return mocap.run_process(store, name, job, takes, processes, blender=bool(opts.get("blender")),
-                                     blender_exe=opts.get("blender_exe"), delete=leftovers if delete_leftovers else None,
+                                     blender_exe=blender_exe, delete=leftovers if delete_leftovers else None,
                                      params=params)
         finally:
             after_mocap_job(name, job)      # the skeleton videos get previews for Cut Takes
