@@ -120,3 +120,77 @@ def test_manual_offset_overlapping_its_camera_is_flagged(scenario):
         assert any("same camera" in fl for fl in after["IMG_20001.MOV"]["sync"]["flags"])  # ...but its neighbour is flagged
     finally:
         store.save(name, snapshot)
+
+
+# ------------------------------------------------------------------ no camera clock attached
+# Hand-made sessions (no ffmpeg): the audio is written straight into the cache.
+
+EPOCH = 1_700_000_000.0
+
+
+@pytest.fixture
+def bare_store(tmp_path):
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    config.set_sessions_dir(tmp_path)
+    yield SessionStore()
+    config.set_sessions_dir(prev)
+
+
+def make_session(store, files, takes):
+    """``files``: (rel, camera, creation time, has audio, offset, sync method), 20 s each."""
+    import numpy as np
+
+    from mocap_preprocess.session_store import file_id
+    paths = store.create("s").ensure()
+    with store.edit("s") as d:
+        sr = int(d["settings"]["sync_sample_rate"])
+        noise = np.random.default_rng(1).standard_normal(20 * sr).astype(np.float32)
+        d["files"], cams = [], []
+        for rel, cam, ct, audio, off, method in files:
+            fid = file_id(rel)
+            d["files"].append({"id": fid, "rel": rel, "size": 1, "mtime": 1.0, "camera": cam, "offset": off,
+                               "sync": {"method": method}, "assets": {},
+                               "probe": {"duration": 20.0, "creation_time": ct, "format_start": 0,
+                                         "video": {"nominal_fps": "30"},
+                                         "audio": {"start": 0, "sample_rate": sr, "channels": 1} if audio else None}})
+            if audio:
+                np.save(paths.audio_npy(fid, sr), noise)
+            if cam not in cams:
+                cams.append(cam)
+        d["cameras"] = [{"id": c, "name": c, "rotation": 0, "include": True} for c in cams]
+        d["takes"] = [{"id": f"t{i}", "name": f"take_{i:02d}", "start": a, "end": b, "export": True}
+                      for i, (a, b) in enumerate(takes, 1)]
+
+
+def test_no_audio_keeps_files_and_takes_where_they_were(bare_store):
+    """Timestamped cameras, no audio: nothing to move, least of all by a Unix timestamp."""
+    make_session(bare_store, [("a.mov", "c1", EPOCH, False, 0.0, "metadata"),
+                              ("b.mov", "c2", EPOCH + 3, False, 3.0, "metadata")], [(5.0, 10.0)])
+    syncing.sync_session(bare_store, "s", Job("sync", "s"))
+    data = bare_store.load("s")
+    by = files_by_rel(data)
+    assert (by["a.mov"]["offset"], by["b.mov"]["offset"]) == (0.0, 3.0)
+    assert by["a.mov"]["sync"] == {"method": "metadata", "via": "creation time", "reason": "no audio track"}
+    assert [(t["start"], t["end"]) for t in data["takes"]] == [(5.0, 10.0)]
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_audio_without_timestamps_and_a_clock_only_camera(bare_store, manual):
+    """The audio file has no creation time (placed by itself, at 0), the other camera has
+    one but no audio: no clock ties that camera to the audio, so it can't be placed by
+    its raw creation time, decades away from everything else."""
+    other = ("b.mov", "c2", EPOCH, False, 30.0 if manual else 0.0, "manual" if manual else "metadata")
+    make_session(bare_store, [("a.mov", "c1", None, True, 21.0, "none"), other], [(25.0, 30.0)])
+    syncing.sync_session(bare_store, "s", Job("sync", "s"))
+    data = bare_store.load("s")
+    by = files_by_rel(data)
+    a, b = by["a.mov"], by["b.mov"]
+    assert a["sync"]["method"] == "reference"
+    assert max(f["offset"] for f in data["files"]) < 100, [(f["rel"], f["offset"]) for f in data["files"]]
+    assert data["takes"][0]["start"] - a["offset"] == pytest.approx(4.0)      # still on the same footage
+    if manual:
+        assert b["sync"]["method"] == "manual" and b["offset"] - a["offset"] == pytest.approx(9.0)
+    else:
+        assert b["sync"] == {"method": "none"} and b["offset"] > a["offset"] + 20

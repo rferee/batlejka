@@ -1214,7 +1214,10 @@ class SessionSync:
         session's existing frame, so takes and manual offsets stay attached to
         the same footage. Anchors: files that were trusted before and are placed
         by audio now (the previous reference first); else the kept manual
-        files; else wherever the files were before."""
+        files; else wherever the files were before. With no camera clock
+        attached a prediction is the raw creation time, which is the fresh frame
+        only when audio placed nothing (then the files go by their clocks)."""
+        clock_frame = any(c.attached for c in self.clocks.values()) or not self.pos
         anchors = []
         for fid, p in self.pos.items():
             f = self.by_id[fid]
@@ -1225,12 +1228,13 @@ class SessionSync:
         if anchors:
             prev_ref = [d for is_ref, d in anchors if is_ref]
             return prev_ref[0] if prev_ref else statistics.median(d for _, d in anchors)
-        manual = [off - self.predict(fid) for fid, off in self.kept.items() if self.predict(fid) is not None]
+        manual = [off - self.predict(fid) for fid, off in self.kept.items()
+                  if self.predict(fid) is not None and clock_frame]
         if manual:
             return statistics.median(manual)
         fresh = {fid: p for fid, p in self.pos.items()}
         for fid in self.by_id:
-            if fid not in fresh and self.predict(fid) is not None and self.clock(fid).attached:
+            if fid not in fresh and self.predict(fid) is not None and (self.clock(fid).attached or not self.pos):
                 fresh[fid] = self.predict(fid)
         prev = [self.by_id[fid]["offset"] - p for fid, p in fresh.items()
                 if fid not in self.kept and self.by_id[fid].get("offset") is not None]
@@ -1319,7 +1323,9 @@ class SessionSync:
                 if f not in self.pos:
                     self.log(f"  {self.rel(f)}: no confident match and no creation time — put after the end", "error")
 
-        # no audio (or nothing usable): the camera clock's prediction
+        # no audio (or nothing usable): the camera clock's prediction. With no clock attached
+        # but files placed by audio, a median clock is the raw creation time, nowhere near them
+        raw_clock = not known and bool(self.pos)
         for f in self.by_id:
             if f in self.kept or f in self.pos:
                 continue
@@ -1327,6 +1333,10 @@ class SessionSync:
             if p is None:
                 continue
             clk = self.clock(f)
+            if raw_clock and clk.via == "median clock":
+                self.log(f"  {self.rel(f)}: no camera clock ties its creation time to the audio — put after the end",
+                         "warn")
+                continue
             via = "camera clock" if clk.via in ("reference", "link", "search") else clk.via
             if not known and not self.kept:
                 via = "creation time"
