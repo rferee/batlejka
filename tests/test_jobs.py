@@ -186,8 +186,16 @@ def test_host_check_follows_the_bind_address(client, monkeypatch):
     monkeypatch.setenv("MOCAP_ALLOWED_HOSTS", "pc.lan, [fe80::1]")
     assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
     assert client.get("/api/jobs", headers={"Host": "[fe80::1]:8765"}).status_code == 200
+    monkeypatch.setenv("MOCAP_ALLOWED_HOSTS", "FE80:0:0:0:0:0:0:2")
+    assert client.get("/api/jobs", headers={"Host": "[fe80::2]:8765"}).status_code == 200
     monkeypatch.delenv("MOCAP_ALLOWED_HOSTS")
+    monkeypatch.setattr(config, "_bind_host", "fd00:0:0:0:0:0:0:5")  # browsers send the short form
+    assert client.get("/api/jobs", headers={"Host": "[fd00::5]:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "[fd00:0:0:0:0:0:0:5]:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "[fd00::6]:8765"}).status_code == 400
     monkeypatch.setattr(config, "_bind_host", "0.0.0.0")             # LAN use: any name the machine has
+    assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
+    monkeypatch.setattr(config, "_bind_host", "0:0:0:0:0:0:0:0")     # :: spelled out
     assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
     assert client.post("/api/jobs/nope/cancel", headers={"Host": "pc.lan:8765",
                                                          "Origin": "http://evil.example"}).status_code == 403

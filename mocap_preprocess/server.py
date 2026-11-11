@@ -1,6 +1,7 @@
 """FastAPI app: JSON API, background jobs, static UI and media serving."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import os
@@ -73,10 +74,19 @@ _WILDCARD_BINDS = {"", "0.0.0.0", "::"}
 _HOST_HEADER = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]/@]*))(?::\d*)?")
 
 
+def _canonical(name: str) -> str:
+    """An IP address in the one spelling browsers send ('fd00:0:0:0:0:0:0:5' -> 'fd00::5');
+    any other name as it is."""
+    try:
+        return str(ipaddress.ip_address(name))
+    except ValueError:
+        return name
+
+
 def _host_name(host: str) -> str:
     """The name in a Host header, without the port: '[::1]:8765' -> '::1'; '' if malformed."""
     m = _HOST_HEADER.fullmatch(host.strip().lower())
-    return (m["v6"] or m["name"]) if m else ""
+    return _canonical(m["v6"] or m["name"]) if m else ""
 
 
 def _allowed_hosts() -> set[str] | None:
@@ -84,10 +94,11 @@ def _allowed_hosts() -> set[str] | None:
     address (LAN use, where it can be reached under any of the machine's names).
     MOCAP_ALLOWED_HOSTS (comma-separated) adds names, e.g. behind a reverse proxy that
     passes the original Host on."""
-    bind = config.bind_host().strip().strip("[]").lower()
+    bind = _canonical(config.bind_host().strip().strip("[]").lower())
     if bind in _WILDCARD_BINDS:
         return None
-    extra = {h.strip().strip("[]").lower() for h in os.environ.get("MOCAP_ALLOWED_HOSTS", "").split(",")}
+    extra = {_canonical(h.strip().strip("[]").lower())
+             for h in os.environ.get("MOCAP_ALLOWED_HOSTS", "").split(",")}
     return (_LOOPBACK_NAMES | {bind} | extra) - {""}
 
 
