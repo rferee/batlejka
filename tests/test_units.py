@@ -335,6 +335,22 @@ def test_takes_validate():
         takes.validate([{"id": "t1", "name": "x", "start": 3, "end": 3}])
 
 
+def test_take_ids_count_on_from_take_seq():
+    """Exports, mocap results and previews are keyed by take id: a new take never gets a
+    deleted take's number, but undo can still bring a deleted take back as it was."""
+    data = {"takes": [{"id": "t2"}, {"id": "bad"}], "mocap": {"takes": {"t4": {}}}, "take_seq": 3}
+    assert takes.take_seq(data) == 4
+    assert takes.take_seq(data, ["t7", "x", None, 12]) == 7
+    assert takes.take_seq({"take_seq": True}) == takes.take_seq({"take_seq": "9"}) == takes.take_seq({}) == 0
+    data = {"files": [_file("a", "A.MOV", 0, 10, cam="c1", offset=0.0), _file("b", "B.MOV", 0, 10, cam="c1", offset=30.0),
+                      _file("c", "C.MOV", 0, 100, cam="c2", offset=0.0)]}
+    assert [(t["id"], t["name"]) for t in takes.detect(data, 5)] == [("t6", "take_01"), ("t7", "take_02")]
+    out = takes.validate([{"id": "t2", "name": "undone", "start": 1, "end": 2}, {"id": "", "name": "new", "start": 3, "end": 4},
+                          {"id": "t2", "name": "dup", "start": 5, "end": 6}, {"id": "t6", "name": "client", "start": 7, "end": 8}], 5)
+    assert [(t["id"], t["name"]) for t in out] == [("t2", "undone"), ("t7", "new"), ("t8", "dup"), ("t6", "client")]
+    assert [t["id"] for t in takes.validate([{"id": "x", "start": 1, "end": 2}], 99999)] == ["t1"]   # numbers ran out
+
+
 def test_metadata_fallback_uses_same_camera_clock():
     files = [_file("g", "G.MOV", 1000.0, 10, cam="c1", offset=5.0), _file("f", "F.MOV", 1030.0, 10, cam="c1"),
              _file("h", "H.MOV", 2000.0, 10, cam="c2", offset=100.0)]

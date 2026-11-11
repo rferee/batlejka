@@ -111,6 +111,7 @@ export async function saveTakes(beacon = false) {
     if (S.name === name && S.data) {
       S.data.takes = d.takes;
       S.data.state = d.state;
+      S.data.take_seq = d.take_seq;
     }
   } catch (e) {
     if (S.name === name) {
@@ -549,7 +550,10 @@ export const ReviewScreen = {
     return `take_${pad2(Math.max(n, 0) + 1)}`;
   },
   createTake(a, b) {
-    const id = nextFree('t', new Set(RV.takes.map((t) => t.id)));
+    // never a deleted take's number: its export folder, mocap results and previews keep its id
+    // (once t99999, the server's last, is used: the lowest free one, as the server does)
+    const n = Math.max(S.data.take_seq || 0, ...RV.takes.map((t) => Number((/^t(\d+)$/.exec(t.id) || [])[1] || 0)));
+    const id = n < 99999 ? `t${n + 1}` : nextFree('t', new Set(RV.takes.map((t) => t.id)));
     RV.takes.push({ id, name: this.nextTakeName(), start: a, end: b, export: true });
     RV.takes.sort((x, y) => x.start - y.start);
     RV.sel = { kind: 'take', id };

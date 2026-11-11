@@ -17,6 +17,7 @@ from . import ffmpeg_tools as ff
 from . import exporter, grouping, pipeline, previews, syncing
 from . import takes as takes_mod
 from .app_state import jobs, require_session, store
+from .fmc import mocap
 from .jobs import JobConflict
 from .routes_frames import router as frames_router
 from .routes_mocap import router as mocap_router
@@ -174,8 +175,16 @@ def create_session(payload: dict = Body(...)):
     return {"name": name}
 
 
+def exported_take_ids(name: str) -> list:
+    try:
+        return [e["info"]["id"] for e in mocap.exported_takes(store.paths(name))]
+    except OSError:      # an unreadable output/ mustn't break the session view
+        return []
+
+
 def session_view(name: str) -> dict:
     data = store.load(name)
+    data["take_seq"] = takes_mod.take_seq(data, exported_take_ids(name))
     data["fps_check"] = pipeline.fps_check(data)
     data["standard_rates"] = pipeline.standard_rates()
     data["jobs"] = [j.info() for j in jobs.active(name)]
@@ -373,22 +382,28 @@ def resync(s: str, fid: str, payload: dict = Body(...)):
 @app.put("/api/sessions/{s}/takes")
 def put_takes(s: str, payload: list = Body(...)):
     name = require_session(s)
-    try:
-        clean = takes_mod.validate(payload)
-    except (ValueError, KeyError, TypeError) as e:
-        raise HTTPException(400, f"invalid takes: {e}")
-    with store.edit(name) as data:
+    exported = exported_take_ids(name)
+    with store.edit(name) as data:     # an error leaves the session unsaved
+        seq = takes_mod.take_seq(data, exported)
+        try:
+            clean = takes_mod.validate(payload, seq)
+        except (ValueError, KeyError, TypeError) as e:
+            raise HTTPException(400, f"invalid takes: {e}")
         data["takes"] = clean
-    return {"takes": clean, "state": data["state"]}
+        data["take_seq"] = max(seq, takes_mod.take_seq(data, exported))   # deleted takes' numbers stay used
+    return {"takes": clean, "state": data["state"], "take_seq": data["take_seq"]}
 
 
 @app.post("/api/sessions/{s}/takes/auto")
 def auto_takes(s: str, payload: dict = Body(default={})):
     name = require_session(s)
+    exported = exported_take_ids(name)
     with store.edit(name) as data:
         if data["takes"] and not (payload or {}).get("replace"):
             raise HTTPException(409, "takes already exist; pass {replace: true}")
-        data["takes"] = takes_mod.detect(data)
+        seq = takes_mod.take_seq(data, exported)
+        data["takes"] = takes_mod.detect(data, seq)
+        data["take_seq"] = max(seq, takes_mod.take_seq(data, exported))
     return session_view(name)
 
 

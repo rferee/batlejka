@@ -220,6 +220,36 @@ def test_media_kinds_and_auto_takes(client, processed):
         client.put(f"/api/sessions/{name}/takes", json=original)
 
 
+def test_new_takes_count_on_past_exported_ones(store):
+    """t1 was exported, then deleted: a new take is t2, so it can't inherit t1's export
+    folder, mocap results and previews."""
+    import json
+    import shutil
+
+    from mocap_preprocess import config
+    client = TestClient(server.app, base_url="http://127.0.0.1:8765")
+    name = "test_take_seq"
+    shutil.rmtree(config.sessions_dir() / name, ignore_errors=True)
+    try:
+        assert client.post("/api/sessions", json={"name": name}).status_code == 200
+        out = config.sessions_dir() / name / "output" / "take_01"
+        out.mkdir(parents=True)
+        (out / "take_info.json").write_text(json.dumps({"id": "t1", "name": "take_01", "start": 1, "end": 4}))
+        assert client.get(f"/api/sessions/{name}").json()["take_seq"] == 1
+        r = client.put(f"/api/sessions/{name}/takes", json=[{"id": "", "name": "new", "start": 5, "end": 9}]).json()
+        assert [t["id"] for t in r["takes"]] == ["t2"] and r["take_seq"] == 2
+        assert client.put(f"/api/sessions/{name}/takes", json=[]).json()["take_seq"] == 2     # t2 deleted: still used
+        r = client.put(f"/api/sessions/{name}/takes", json=[{"id": "t1", "name": "x", "start": 1, "end": 4}]).json()
+        assert [t["id"] for t in r["takes"]] == ["t1"]                                         # undo keeps its id
+        assert client.get(f"/api/sessions/{name}").json()["take_seq"] == 2
+        with store.edit(name) as d:                 # saved before take_seq existed
+            d.pop("take_seq")
+            d["takes"] = [{"id": "t5", "name": "x", "start": 1, "end": 4, "export": True}]
+        assert client.put(f"/api/sessions/{name}/takes", json=[]).json()["take_seq"] == 5
+    finally:
+        shutil.rmtree(config.sessions_dir() / name, ignore_errors=True)
+
+
 def test_dropped_connection_still_closes_its_socket():
     import sys
     from asyncio import proactor_events
