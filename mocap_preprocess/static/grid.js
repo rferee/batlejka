@@ -202,6 +202,7 @@ export class Grid {
       this.switchCell(cell, f, want);
     }
     if (!f) return;
+    cell.cur = f;    // the same file after a nudge is a new entry: the tile click and play() read its start
     const ft = t - f.start;
     if (cell.mode === 'video') {
       const v = cell.video;
