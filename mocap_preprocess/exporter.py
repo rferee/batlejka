@@ -9,6 +9,7 @@ user rotation baked in — the only place pixels are rotated (R1) — and exactl
 """
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
@@ -106,12 +107,30 @@ def plan_segments(take: dict, files: list[dict], fps: Fraction) -> list[Segment]
     return segs
 
 
+def camera_file_names(cameras: list[dict]) -> dict[str, str]:
+    """Camera id -> the name its output files carry: sanitized, with _2, _3, … for names
+    that clash (ignoring case), handed out in session order over every camera. So a camera's
+    file is named the same in every take and export, whichever cameras cover the take or are
+    selected; mocap matches a take's videos to a calibration by file name."""
+    names, used = {}, set()
+    for c in cameras:
+        name = sanitize_filename(c["name"], c["id"])
+        base, k = name, 2
+        while name.lower() in used:
+            name = f"{base}_{k}"
+            k += 1
+        used.add(name.lower())
+        names[c["id"]] = name
+    return names
+
+
 def plan_take(data: dict, take: dict, camera_ids: list[str], fps: Fraction | None = None) -> tuple[list[CamPlan], list[dict]]:
     fps = fps or target_fraction(data)
     cams = {c["id"]: c for c in data["cameras"]}
+    names = camera_file_names(data["cameras"])
     files = placed_video_files(data)
-    plans, skipped, used = [], [], set()
-    for cid in camera_ids:
+    plans, skipped = [], []
+    for cid in dict.fromkeys(camera_ids):     # a camera listed twice still gets one file
         cam = cams.get(cid)
         if cam is None:
             continue
@@ -119,12 +138,7 @@ def plan_take(data: dict, take: dict, camera_ids: list[str], fps: Fraction | Non
         if not segs:
             skipped.append({"camera_id": cid, "name": cam["name"], "reason": "no footage overlaps this take"})
             continue
-        name = sanitize_filename(cam["name"], cid)
-        base, k = name, 2
-        while name.lower() in used:
-            name = f"{base}_{k}"
-            k += 1
-        used.add(name.lower())
+        name = names[cid]
         duration = take["end"] - take["start"]
         if len(segs) == 1:
             best = segs[0].file
@@ -302,6 +316,22 @@ def normalize_options(options: dict, defaults: dict) -> dict:
     return o
 
 
+def _export_dirs(output: Path) -> dict[str, set]:
+    """Lowercased folder name in output/ -> the take ids their take_info.json files name.
+    Folders without a readable take_info.json aren't listed."""
+    found: dict[str, set] = {}
+    if not output.is_dir():
+        return found
+    for d in output.iterdir():
+        try:
+            info = json.loads((d / "take_info.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(info, dict) and info.get("id"):
+            found.setdefault(d.name.lower(), set()).add(str(info["id"]))
+    return found
+
+
 def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera_ids: list[str],
            options: dict) -> dict:
     paths = store.paths(name)
@@ -316,11 +346,14 @@ def export(store: SessionStore, name: str, job: Job, take_ids: list[str], camera
 
     work = []
     used_dirs = set()
+    on_disk = _export_dirs(paths.output)
     for tk in takes:
         plans, skipped = plan_take(data, tk, camera_ids, fps)
         dname = sanitize_filename(tk["name"], tk["id"])
         base, k = dname, 2
-        while dname.lower() in used_dirs:
+        # take names aren't unique: a folder another take was exported into (now or in an
+        # earlier export) is that take's, not one to overwrite
+        while dname.lower() in used_dirs or on_disk.get(dname.lower(), set()) - {tk["id"]}:
             dname = f"{base}_{k}"
             k += 1
         used_dirs.add(dname.lower())

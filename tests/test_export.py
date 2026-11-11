@@ -81,6 +81,44 @@ def test_plan_lays_a_cameras_files_end_to_end():
     assert "adelay=288480S:all=1" in graph
 
 
+def test_camera_file_names_dont_depend_on_the_take():
+    """Clashing camera names get _2, _3 in session order over every camera, so a camera
+    with no footage in a take doesn't pass its name on: mocap matches calibration by file name."""
+    def clip(rel, cam, offset):
+        return {"rel": rel, "camera": cam, "offset": offset, "probe": {"video": {"duration": 10.0}}}
+    data = {"cameras": [{"id": "c1", "name": "cam", "rotation": 0}, {"id": "c2", "name": "Cam", "rotation": 0},
+                        {"id": "c3", "name": "other", "rotation": 0}],
+            "files": [clip("a", "c1", 0.0), clip("b", "c2", 0.0), clip("c", "c2", 20.0), clip("d", "c3", 20.0)]}
+    both, _ = exporter.plan_take(data, {"start": 2.0, "end": 8.0}, ["c1", "c2", "c3"], Fraction(30))
+    alone, skipped = exporter.plan_take(data, {"start": 22.0, "end": 28.0}, ["c3", "c2", "c1", "c2"], Fraction(30))
+    assert [(p.camera["id"], p.name) for p in both] == [("c1", "cam"), ("c2", "Cam_2")]
+    assert [(p.camera["id"], p.name) for p in alone] == [("c3", "other"), ("c2", "Cam_2")]
+    assert [s["camera_id"] for s in skipped] == ["c1"]
+
+
+def test_same_named_takes_exported_one_at_a_time_keep_their_folders(tmp_path):
+    """Take names aren't unique: exporting one take doesn't overwrite the folder another
+    take of that name was exported into before, and a take exported again reuses its own."""
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path)
+        st = SessionStore()
+        st.create("s")
+        with st.edit("s") as d:         # no footage: the camera is skipped, so no ffmpeg runs
+            d["cameras"] = [{"id": "c1", "name": "cam", "rotation": 0, "include": True}]
+            d["takes"] = [{"id": "t1", "name": "jump", "start": 1.0, "end": 2.0, "export": True},
+                          {"id": "t2", "name": "Jump", "start": 3.0, "end": 4.0, "export": True}]
+        opts = exporter.normalize_options({}, config.DEFAULT_EXPORT_OPTIONS)
+        dirs = [exporter.export(st, "s", Job("export", "s"), [tid], ["c1"], opts)["takes"][0]["dir"]
+                for tid in ("t1", "t2", "t1", "t2")]
+        assert dirs == ["jump", "Jump_2", "jump", "Jump_2"]
+        out = st.paths("s").output
+        assert [json.loads((out / d / "take_info.json").read_text())["id"] for d in ("jump", "Jump_2")] == ["t1", "t2"]
+    finally:
+        config.set_sessions_dir(prev)
+
+
 @pytest.fixture(scope="module")
 def exported(synced):
     store, name, gt = synced
