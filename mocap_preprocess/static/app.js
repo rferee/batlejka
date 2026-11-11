@@ -118,7 +118,7 @@ export const GET = (u) => api('GET', u);
 export const POST = (u, b = {}) => api('POST', u, b);
 export const PUT = (u, b) => api('PUT', u, b);
 const enc = encodeURIComponent;
-export const sUrl = (path = '') => `/api/sessions/${enc(S.name)}${path}`;
+export const sUrl = (path = '', name = S.name) => `/api/sessions/${enc(name)}${path}`;
 export const mediaUrl = (kind, f, ext) => `/media/${enc(S.name)}/${kind}/${f.id}.${ext}?v=${Math.round((f.mtime || 0) * 1000)}`;
 
 // ------------------------------------------------------------------ toasts / modals
@@ -390,10 +390,14 @@ export async function loadSessions() {
 }
 
 export async function refreshSession() {
-  if (!S.name) return;
+  const name = S.name;
+  if (!name) return;
   try {
-    S.data = await GET(sUrl());
+    const data = await GET(sUrl());
+    if (S.name !== name) return;     // another session was opened meanwhile: this answer is the old one's
+    S.data = data;
   } catch (e) {
+    if (S.name !== name) return;
     if (e.status === 404 || e.status === 400) {
       S.name = null;
       S.data = null;
@@ -422,6 +426,7 @@ export async function openSession(name, { scan = true } = {}) {
   S.name = name;
   prefs.set('session', name);
   await refreshSession();
+  if (S.name !== name) return;     // opened another one meanwhile, which scans itself
   if (scan) await startJob('/scan');
   pollSoon();
 }

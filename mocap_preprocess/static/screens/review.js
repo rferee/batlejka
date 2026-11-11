@@ -60,16 +60,22 @@ export const padText = (c) => [
 
 // Takes and export options are edited on both Review and Export, so they live
 // here rather than in either screen, and are saved shortly after each change.
+// RV.session is the session they (and the undo history) belong to; saves go there.
 export const RV = {
   t: 0, playing: false, speed: 1, sel: null, pendingIn: null, pendingOut: null,
   takes: [], committed: [], undo: [], takesDirty: false, takesSaving: false,
-  pendingOffsets: new Map(), opts: null, optsDirty: false,
+  pendingOffsets: new Map(), opts: null, optsDirty: false, session: null,
 };
 const saveTimers = {};
 export const exportCams = () => RV.opts.camera_ids.filter((id) => cameraById(id));
 
 /** Take the session's takes and export options, unless edits to them aren't saved yet. */
 export function loadTakes() {
+  // still another session's (it was left from a screen that doesn't drop them, e.g. Home)
+  if (RV.session !== S.name) {
+    leaveTakes();
+    RV.session = S.name;
+  }
   if (!RV.takesDirty && !RV.takesSaving) {
     RV.takes = clone(S.data.takes || []);
     RV.committed = clone(RV.takes);
@@ -97,24 +103,24 @@ function queueTakesSave() {
 }
 export async function saveTakes(beacon = false) {
   clearTimeout(saveTimers.takes);
-  if (!RV.takesDirty || !S.name) return;
+  const name = RV.session;    // not S.name: a retry can fire after another session was opened
+  if (!RV.takesDirty || !name) return;
   RV.takesDirty = false;
   const body = JSON.stringify(RV.takes);
   if (beacon) {
-    fetch(sUrl('/takes'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+    fetch(sUrl('/takes', name), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
     return;
   }
   RV.takesSaving = true;
-  const name = S.name;
   try {
-    const d = await api('PUT', sUrl('/takes'), JSON.parse(body));
+    const d = await api('PUT', sUrl('/takes', name), JSON.parse(body));
     if (S.name === name && S.data) {
       S.data.takes = d.takes;
       S.data.state = d.state;
       S.data.take_seq = d.take_seq;
     }
   } catch (e) {
-    if (S.name === name) {
+    if (RV.session === name) {
       RV.takesDirty = true;
       clearTimeout(saveTimers.takes);
       saveTimers.takes = setTimeout(() => saveTakes(), 3000); // retry
@@ -131,26 +137,26 @@ export function queueOptsSave() {
 }
 export async function saveOpts(beacon = false) {
   clearTimeout(saveTimers.opts);
-  if (!RV.optsDirty || !S.name) return;
+  const name = RV.session;
+  if (!RV.optsDirty || !name) return;
   RV.optsDirty = false;
   const body = JSON.stringify(RV.opts);
   if (beacon) {
-    fetch(sUrl('/export_options'), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+    fetch(sUrl('/export_options', name), { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
     return;
   }
-  const name = S.name;
   try {
-    const d = await api('PUT', sUrl('/export_options'), JSON.parse(body));
+    const d = await api('PUT', sUrl('/export_options', name), JSON.parse(body));
     if (S.name === name && S.data) S.data.export_options = d.export_options;
   } catch (e) { toast(e.message, 'error'); }
 }
-/** Switching sessions: send the old one's edits while sUrl() still points at it, then drop them. */
+/** Switching sessions: send the old one's edits to it, then drop them. */
 export function leaveTakes() {
   saveTakes(true);
   saveOpts(true);
   Object.assign(RV, {
     t: 0, sel: null, pendingIn: null, pendingOut: null, takes: [], committed: [], undo: [],
-    takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined,
+    takesDirty: false, takesSaving: false, opts: null, optsDirty: false, syncedAt: undefined, session: null,
   });
 }
 
@@ -598,6 +604,7 @@ export const ReviewScreen = {
     });
   },
   async autoTakes() {
+    const name = S.name;
     if (RV.takes.length) {
       const ok = await confirmModal({
         title: 'Replace takes?',
@@ -608,7 +615,9 @@ export const ReviewScreen = {
     }
     try {
       await saveTakes();
+      if (S.name !== name) return;     // another session was opened meanwhile: not its takes to replace
       const d = await POST(sUrl('/takes/auto'), { replace: true });
+      if (S.name !== name) return;
       RV.undo.push(clone(RV.takes));
       S.data = d;
       RV.takes = clone(d.takes);
@@ -637,8 +646,9 @@ export const ReviewScreen = {
     clearTimeout(this.offTimer);
     const items = [...RV.pendingOffsets.entries()];
     RV.pendingOffsets.clear();
+    const base = sUrl();     // the session they were made in, even if another opens during the loop
     for (const [fid, offset] of items) {
-      const url = sUrl(`/files/${fid}/offset`);
+      const url = `${base}/files/${fid}/offset`;
       if (beacon) {
         fetch(url, { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ offset }) }).catch(() => {});
         continue;
@@ -655,7 +665,7 @@ export const ReviewScreen = {
     const name = S.name;
     try {
       await this.flushOffsets();
-      let job = await POST(sUrl(`/files/${f.id}/resync`), { ref_fid: refId });
+      let job = await POST(sUrl(`/files/${f.id}/resync`, name), { ref_fid: refId });
       pollSoon();
       while (job.status === 'queued' || job.status === 'running') {
         await new Promise((r) => setTimeout(r, 300));
