@@ -578,6 +578,14 @@ def test_take_detail_and_blend(fake):
     q = d["quality"]
     assert q["frames"] == 10 and q["body_tracked_pct"] == 90.0
     assert q["upper_arm_mm"][0] == 300.0 and q["thigh_mm"][0] == 400.0
+    # with the raw triangulation there, "tracked" counts it, not the gap-filled output
+    raw = np.zeros((10, 40, 3))               # body points first, then hands and face
+    raw[[3, 5, 6], 7] = np.nan                # frames 5 and 6 were filled by post-processing
+    raw[:, 35] = np.nan                       # a missing hand point doesn't count against the body
+    (paths.output / "jump" / "output_data" / "raw_data").mkdir(parents=True, exist_ok=True)
+    np.save(paths.output / "jump" / "output_data" / "raw_data" / "jump_3dData_numFrames_numTrackedPoints_spatialXYZ.npy", raw)
+    q = client.get(f"/api/sessions/{NAME}/mocap/takes/t2/detail").json()["quality"]
+    assert q["body_tracked_pct"] == 70.0 and q["gaps_filled_frames"] == 2 and q["longest_gap"] == 2
     assert d["out_dir"] == "output/jump/" and d["info"]["calibration"]["profile"] == "p1"
     assert any(f["name"].endswith("_body_3d_xyz.npy") for f in d["files"]) and d["out_size"] > 0
     assert d["blend"] is None

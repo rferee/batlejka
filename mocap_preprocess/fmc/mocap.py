@@ -902,7 +902,10 @@ def _quality(take_dir: Path) -> dict | None:
         if xyz_f is not None:
             rawb = np.asarray(np.load(xyz_f, mmap_mode="r")[:, :BODY_POINTS, :], dtype=float)
             if rawb.shape[0] == frames:
-                filled = (~np.isfinite(rawb).all(axis=(1, 2))) & whole
+                raw_whole = np.isfinite(rawb).all(axis=(1, 2))
+                if rawb.shape == body.shape and frames:     # tracked = before gap filling, as Details says
+                    q["body_tracked_pct"] = round(float(raw_whole.mean()) * 100, 1)
+                filled = ~raw_whole & whole
                 longest = cur = 0
                 for f in filled:
                     cur = cur + 1 if f else 0
