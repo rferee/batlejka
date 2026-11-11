@@ -1357,7 +1357,11 @@ class SessionSync:
             for f in d["files"]:
                 if f["id"] not in offsets:
                     continue
-                if not self.resync_manual and f["id"] not in self.kept and f["sync"].get("method") == "manual":
+                if f["id"] in self.kept:     # manual from the start: its offset may have been nudged since
+                    nudged = f.get("offset") is None or round(f["offset"], 6) != round(self.kept[f["id"]], 6)
+                else:
+                    nudged = not self.resync_manual and f["sync"].get("method") == "manual"
+                if nudged:
                     # nudged by the user while we were busy: keep it, but move it with everything else
                     if f.get("offset") is not None:
                         f["offset"] = round(f["offset"] + shift, 6)

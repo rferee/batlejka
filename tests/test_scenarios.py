@@ -194,3 +194,24 @@ def test_audio_without_timestamps_and_a_clock_only_camera(bare_store, manual):
         assert b["sync"]["method"] == "manual" and b["offset"] - a["offset"] == pytest.approx(9.0)
     else:
         assert b["sync"] == {"method": "none"} and b["offset"] > a["offset"] + 20
+
+
+def test_nudging_a_manual_clip_during_the_sync_is_kept(bare_store, monkeypatch):
+    """A clip that was manual when the sync started keeps its offset as it was then; one the
+    user nudges while the sync runs keeps the nudge (moved with everything else)."""
+    make_session(bare_store, [("a.mov", "c1", None, True, 21.0, "none"),
+                              ("b.mov", "c2", EPOCH, False, 30.0, "manual")], [(25.0, 30.0)])
+    real_check = syncing.SessionSync.check
+
+    def check(self, offsets, info, delta):           # runs after every file is placed, before the save
+        with bare_store.edit("s") as d:
+            f = next(x for x in d["files"] if x["rel"] == "b.mov")
+            f["offset"], f["sync"] = 30.5, {"method": "manual", "was": "metadata"}
+        real_check(self, offsets, info, delta)
+    monkeypatch.setattr(syncing.SessionSync, "check", check)
+    syncing.sync_session(bare_store, "s", Job("sync", "s"))
+    data = bare_store.load("s")
+    a, b = files_by_rel(data)["a.mov"], files_by_rel(data)["b.mov"]
+    assert b["offset"] - a["offset"] == pytest.approx(9.5)                      # 9.0 before the nudge
+    assert b["sync"] == {"method": "manual", "was": "metadata"}
+    assert data["takes"][0]["start"] - a["offset"] == pytest.approx(4.0)
