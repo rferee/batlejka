@@ -21,11 +21,17 @@ from .session_store import SessionStore, file_id, now, video_files
 # ---------------------------------------------------------------------------
 # scan
 
-def list_source_files(source: Path) -> list[dict]:
+def list_source_files(source: Path, errors: list[str] | None = None) -> list[dict]:
+    """Video files under ``source``; what couldn't be read (a folder, a file's
+    size) is appended to ``errors`` instead of being skipped silently."""
     out = []
     if not source.is_dir():
         return out
-    for root, dirs, files in os.walk(source):
+
+    def failed(e: OSError) -> None:
+        if errors is not None:
+            errors.append(f"{e.filename}: {e.strerror or e}")
+    for root, dirs, files in os.walk(source, onerror=failed):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for fn in sorted(files):
             if fn.startswith(".") or os.path.splitext(fn)[1].lower() not in config.VIDEO_EXTS:
@@ -33,7 +39,8 @@ def list_source_files(source: Path) -> list[dict]:
             full = Path(root) / fn
             try:
                 st = full.stat()
-            except OSError:
+            except OSError as e:
+                failed(e)
                 continue
             rel = full.relative_to(source).as_posix()
             out.append({"rel": rel, "path": full, "size": st.st_size, "mtime": round(st.st_mtime, 3)})
@@ -65,8 +72,18 @@ def delete_cache(paths, fid: str) -> None:
 
 def scan(store: SessionStore, name: str, job: Job | None = None) -> dict:
     paths = store.paths(name)
-    entries = list_source_files(paths.source)
+    errors: list[str] = []
+    entries = list_source_files(paths.source, errors)
     data = store.load(name)
+    # a missing or half-readable source/ (unplugged drive, renamed folder) would read as
+    # "every file was removed" and take the offsets, cameras and caches with it
+    if data["files"] and not paths.source.is_dir():
+        raise RuntimeError("source/ is missing — nothing was changed; put the footage back and scan again")
+    if errors:
+        if job:
+            for e in errors:
+                job.log(f"can't read {e}", "error")
+        raise RuntimeError(f"can't read {len(errors)} item(s) in source/ ({errors[0]}) — nothing was changed")
     known = {f["rel"]: f for f in data["files"]}
 
     def changed(e):

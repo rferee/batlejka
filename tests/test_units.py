@@ -119,6 +119,54 @@ def test_file_ids_from_disk_never_leave_preprocess(tmp_path):
         config.set_sessions_dir(prev)
 
 
+def test_scan_keeps_the_session_when_source_is_missing_or_unreadable(tmp_path, monkeypatch):
+    """An unplugged drive or a renamed source/ doesn't read as "every file was removed"."""
+    import os
+
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path / "sessions")
+        st = SessionStore()
+        paths = st.create("s").ensure()
+        (paths.source / "a.mov").write_bytes(b"0" * 10)
+        with st.edit("s") as d:                     # probed already, so scan runs no ffprobe
+            e = pipeline.list_source_files(paths.source)[0]
+            f = pipeline.new_file_record(e["rel"], e["size"], e["mtime"])
+            f.update(probe={"duration": 1.0, "video": {"nominal_fps": "30"}}, camera="c1", offset=2.5,
+                     sync={"method": "manual"})
+            d["files"] = [f]
+            d["cameras"] = [{"id": "c1", "name": "a", "rotation": 0, "include": True}]
+        thumb = paths.thumb(file_id("a.mov"))
+        thumb.write_bytes(b"jpg")
+        before = paths.json.read_bytes()
+
+        paths.source.rename(tmp_path / "moved")
+        with pytest.raises(RuntimeError, match="source/ is missing"):
+            pipeline.scan(st, "s")
+        assert paths.json.read_bytes() == before and thumb.exists()
+        (tmp_path / "moved").rename(paths.source)
+
+        real_walk = os.walk
+
+        def walk(top, onerror=None, **kw):          # a subfolder that can't be listed
+            onerror(PermissionError(13, "Permission denied", os.path.join(top, "locked")))
+            yield from real_walk(top, onerror=onerror, **kw)
+        with monkeypatch.context() as m:
+            m.setattr(pipeline.os, "walk", walk)
+            with pytest.raises(RuntimeError, match=r"can't read 1 item\(s\)"):
+                pipeline.scan(st, "s")
+        assert paths.json.read_bytes() == before and thumb.exists()
+
+        assert pipeline.scan(st, "s") == {"files": 1, "added": 0, "removed": 0, "reprobed": 0}
+        data = st.load("s")
+        assert [(f["offset"], f["camera"]) for f in data["files"]] == [(2.5, "c1")]
+        assert [c["id"] for c in data["cameras"]] == ["c1"] and thumb.exists()
+    finally:
+        config.set_sessions_dir(prev)
+
+
 @pytest.mark.parametrize("given,expected", [
     ({"layout": "x", "encoder": "av1", "nvenc_preset": "p9"}, {"layout": "freemocap", "encoder": "libx264", "nvenc_preset": "p5"}),
     ({"crf": "x"}, {"crf": 17}), ({"crf": 99}, {"crf": 51}), ({"crf": -3}, {"crf": 0}),
