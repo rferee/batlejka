@@ -59,7 +59,7 @@ def session():
         d.mkdir()
         for _, cam in CAMS:
             ffmpeg("-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=1", "-c:v", "mpeg4", d / f"{cam}_synced_{suffix}.mp4")
-    yield TestClient(server.app), paths
+    yield TestClient(server.app, base_url="http://127.0.0.1:8765"), paths
     config.set_sessions_dir(prev)
 
 

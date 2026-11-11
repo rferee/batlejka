@@ -42,7 +42,7 @@ def client():
     _take(out, "jump", "t2", "30000/1001", None)          # exported, not processed
     _take(out, "wave", "t3", "30000/1001", 4, hands=True)
     try:
-        yield TestClient(server.app)
+        yield TestClient(server.app, base_url="http://127.0.0.1:8765")
     finally:
         config.set_sessions_dir(prev)
         shutil.rmtree(ROOT, ignore_errors=True)

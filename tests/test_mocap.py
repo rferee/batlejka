@@ -126,7 +126,7 @@ def fake(monkeypatch):
     # no background preview builds here: they'd outlive the test and read the next one's session
     monkeypatch.setattr(routes_mocap, "after_mocap_job", lambda name, job: None)
     monkeypatch.setattr(env, "ready", lambda: True)
-    yield TestClient(server.app), fr, paths
+    yield TestClient(server.app, base_url="http://127.0.0.1:8765"), fr, paths
     config.set_sessions_dir(prev)
 
 

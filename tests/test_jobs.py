@@ -7,7 +7,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from mocap_preprocess import server
+from mocap_preprocess import config, server
 from mocap_preprocess.app_state import jobs
 from mocap_preprocess.ffmpeg_tools import Cancelled
 from mocap_preprocess.jobs import JobConflict, JobManager
@@ -15,7 +15,7 @@ from mocap_preprocess.jobs import JobConflict, JobManager
 
 @pytest.fixture(scope="module")
 def client():
-    return TestClient(server.app)
+    return TestClient(server.app, base_url="http://127.0.0.1:8765")
 
 
 def wait(job, timeout=10):
@@ -116,3 +116,48 @@ def test_cancelled_exception_from_a_tool_counts_as_cancel():
 
     job = wait(jobs.start("test_cancelled_exc", "jobs-test", run))
     assert job.status == "cancelled"
+
+
+def test_foreign_host_and_cross_site_writes_are_refused(client, monkeypatch):
+    """DNS rebinding (a foreign Host) and cross-site forms (a foreign Origin) can't reach the API."""
+    monkeypatch.delenv("MOCAP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(config, "_bind_host", "127.0.0.1")
+    job = wait(jobs.start("test_guard", "jobs-test", lambda j: None))
+    cancel = f"/api/jobs/{job.id}/cancel"
+    assert client.get("/api/jobs", headers={"Host": "evil.example"}).status_code == 400
+    assert client.get("/api/jobs", headers={"Host": "evil.example:8765"}).status_code == 400
+    assert client.get("/", headers={"Host": "127.0.0.1.evil.example"}).status_code == 400
+    assert client.post(cancel, headers={"Host": "evil.example"}).status_code == 400
+    assert client.get("/api/jobs", headers={"Host": "[::1]:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "localhost:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "[::1]evil:8765"}).status_code == 400
+    assert client.post(cancel, headers={"Origin": "http://evil.example"}).status_code == 403
+    assert client.post(cancel, headers={"Origin": "null"}).status_code == 403
+    assert client.post(cancel, headers={"Origin": "http://127.0.0.1:9999"}).status_code == 403
+    assert client.post(cancel, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.post(cancel, headers={"Origin": "http://127.0.0.1:8765"}).status_code == 200
+    assert client.post(cancel, headers={"Origin": "http://localhost:8765", "Host": "localhost:8765"}).status_code == 200
+    assert client.post(cancel).status_code == 200                    # no Origin: a script, curl
+    assert client.get("/api/jobs", headers={"Origin": "http://evil.example"}).status_code == 200   # reads: Host only
+
+
+def test_host_check_follows_the_bind_address(client, monkeypatch):
+    monkeypatch.delenv("MOCAP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(config, "_bind_host", "192.168.1.5")
+    assert client.get("/api/jobs", headers={"Host": "192.168.1.5:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 400
+    monkeypatch.setenv("MOCAP_ALLOWED_HOSTS", "pc.lan, [fe80::1]")
+    assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
+    assert client.get("/api/jobs", headers={"Host": "[fe80::1]:8765"}).status_code == 200
+    monkeypatch.delenv("MOCAP_ALLOWED_HOSTS")
+    monkeypatch.setattr(config, "_bind_host", "0.0.0.0")             # LAN use: any name the machine has
+    assert client.get("/api/jobs", headers={"Host": "pc.lan:8765"}).status_code == 200
+    assert client.post("/api/jobs/nope/cancel", headers={"Host": "pc.lan:8765",
+                                                         "Origin": "http://evil.example"}).status_code == 403
+
+
+def test_the_ui_refuses_to_be_framed(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["x-frame-options"] == "DENY"
+    assert r.headers["content-security-policy"] == "frame-ancestors 'none'"

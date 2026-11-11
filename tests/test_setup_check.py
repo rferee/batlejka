@@ -108,7 +108,7 @@ def fake_machine(monkeypatch, *, gpu=GPU, nvenc_ok=True, fmc=None, ready=True):
 def client():
     from mocap_preprocess import server
 
-    return TestClient(server.app)
+    return TestClient(server.app, base_url="http://127.0.0.1:8765")
 
 
 def test_setup_shape_all_good(monkeypatch, client):

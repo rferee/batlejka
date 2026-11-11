@@ -18,7 +18,7 @@ pytestmark = pytest.mark.fmc
 
 @pytest.fixture(scope="module")
 def client():
-    return TestClient(server.app)
+    return TestClient(server.app, base_url="http://127.0.0.1:8765")
 
 
 def test_selftest_through_the_api(client):

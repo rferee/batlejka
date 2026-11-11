@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         log.warning("WARNING: binding to a non-loopback address exposes your footage to the network")
 
+    config.set_bind_host(args.host)
+
     log.info("loading the server...")
     t0 = time.perf_counter()
     import uvicorn

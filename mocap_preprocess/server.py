@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import aio_fix, config
@@ -49,7 +50,10 @@ class ConsoleLog:
             if message["type"] == "http.response.start":
                 seen["status"] = message["status"]
                 if ui_file:
-                    message["headers"] = [*message.get("headers", []), (b"cache-control", b"no-cache")]
+                    message["headers"] = [*message.get("headers", []), (b"cache-control", b"no-cache"),
+                                          # no other page may frame the UI and click its buttons
+                                          (b"content-security-policy", b"frame-ancestors 'none'"),
+                                          (b"x-frame-options", b"DENY")]
             await send(message)
 
         try:
@@ -61,8 +65,57 @@ class ConsoleLog:
                             scope["method"], scope["path"], code, (time.perf_counter() - t0) * 1000)
 
 
+_LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1"}
+_WILDCARD_BINDS = {"", "0.0.0.0", "::"}
+_HOST_HEADER = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]/@]*))(?::\d*)?")
+
+
+def _host_name(host: str) -> str:
+    """The name in a Host header, without the port: '[::1]:8765' -> '::1'; '' if malformed."""
+    m = _HOST_HEADER.fullmatch(host.strip().lower())
+    return (m["v6"] or m["name"]) if m else ""
+
+
+def _allowed_hosts() -> set[str] | None:
+    """The host names the server answers to; None for any, when it listens on a wildcard
+    address (LAN use, where it can be reached under any of the machine's names).
+    MOCAP_ALLOWED_HOSTS (comma-separated) adds names, e.g. behind a reverse proxy that
+    passes the original Host on."""
+    bind = config.bind_host().strip().strip("[]").lower()
+    if bind in _WILDCARD_BINDS:
+        return None
+    extra = {h.strip().strip("[]").lower() for h in os.environ.get("MOCAP_ALLOWED_HOSTS", "").split(",")}
+    return (_LOOPBACK_NAMES | {bind} | extra) - {""}
+
+
+class HostGuard:
+    """Refuses what a web page in the browser could otherwise do to this local server: a
+    foreign Host header (DNS rebinding: a page whose name now points at 127.0.0.1 reads the
+    API and the footage), and writes sent from another origin (a plain cross-site form can
+    POST without a preflight). Requests without an Origin header (scripts, curl) pass."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in reversed(scope["headers"])}
+        host = headers.get("host", "").strip().lower()
+        allowed = _allowed_hosts()
+        if allowed is not None and _host_name(host) not in allowed:
+            return await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
+        if scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            origin = headers.get("origin")
+            if ((origin is not None and origin.strip().lower() not in (f"http://{host}", f"https://{host}"))
+                    or headers.get("sec-fetch-site", "").strip().lower() == "cross-site"):
+                return await PlainTextResponse("Cross-site request refused", status_code=403)(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Batlejka", docs_url="/api/docs", openapi_url="/api/openapi.json")
-app.add_middleware(ConsoleLog)
+app.add_middleware(HostGuard)
+app.add_middleware(ConsoleLog)     # added last, so it runs first and logs the guard's refusals too
 
 
 # ---------------------------------------------------------------------------

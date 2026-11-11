@@ -78,6 +78,20 @@ def sessions_dir() -> Path:
     return _sessions_dir
 
 
+_bind_host = "127.0.0.1"
+
+
+def set_bind_host(host: str) -> None:
+    """The address the server listens on (--host). The server answers only to the loopback
+    names and this one, unless it is a wildcard address (server.HostGuard)."""
+    global _bind_host
+    _bind_host = host
+
+
+def bind_host() -> str:
+    return _bind_host
+
+
 _tools_found: dict[tuple[str, str | None], str] = {}
 
 
