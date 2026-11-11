@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from conftest import files_by_rel
-from mocap_preprocess import config, exporter, ffmpeg_tools as ff, takes
+from mocap_preprocess import config, exporter, ffmpeg_tools as ff, setup_check, takes
 from mocap_preprocess.jobs import Job
 
 
@@ -317,12 +317,15 @@ def _gpu_available() -> bool:
         r = subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=256x144:d=0.2",
                             "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True, timeout=30)
         hw = subprocess.run([ffmpeg, "-hide_banner", "-hwaccels"], capture_output=True, text=True, timeout=30)
-        return r.returncode == 0 and "cuda" in hw.stdout
+        if r.returncode != 0 or "cuda" not in hw.stdout:
+            return False
+        # the GPU path scales with scale_cuda, which not every ffmpeg build has: Setup's own decode test
+        return setup_check._test_decode(ffmpeg)["ok"]
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
-@pytest.mark.skipif(not _gpu_available(), reason="needs an NVIDIA GPU (CUDA decode + NVENC)")
+@pytest.mark.skipif(not _gpu_available(), reason="needs an NVIDIA GPU (CUDA decode with scale_cuda + NVENC)")
 def test_gpu_pipeline_gives_the_same_takes(exported):
     """GPU decode/scale (+ CPU only for rotation and padding) → NVENC: same frame
     counts, rotation, flash alignment and padding as the CPU path."""
