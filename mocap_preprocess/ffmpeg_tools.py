@@ -415,9 +415,9 @@ def extract_audio(src: Path, sample_rate: int) -> np.ndarray:
 
 
 def scale_expr(long_side: int) -> str:
-    """Fit the long side to ``long_side`` (downscale only), keep orientation."""
+    """Fit the long side to ``long_side`` (downscale only), keep orientation; even sizes for yuv420p."""
     L = int(long_side)
-    return f"scale=w='if(gte(iw,ih),min({L},iw),-2)':h='if(gte(iw,ih),-2,min({L},ih))'"
+    return f"scale=w='if(gte(iw,ih),trunc(min({L},iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min({L},ih)/2)*2)'"
 
 
 # A browser-friendly scrub video: fast H.264 with short GOPs (seeks land every 15 frames), mono AAC.

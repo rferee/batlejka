@@ -69,7 +69,7 @@ def scale_filter(long_side, cuda: bool = False) -> str:
         dims = "w=trunc(iw/2)*2:h=trunc(ih/2)*2"
     else:
         L = int(long_side)
-        dims = f"w='if(gte(iw,ih),min({L},trunc(iw/2)*2),-2)':h='if(gte(iw,ih),-2,min({L},trunc(ih/2)*2))'"
+        dims = f"w='if(gte(iw,ih),trunc(min({L},iw)/2)*2,-2)':h='if(gte(iw,ih),-2,trunc(min({L},ih)/2)*2)'"
     return f"scale_cuda={dims}:format=nv12" if cuda else f"scale={dims}"
 
 

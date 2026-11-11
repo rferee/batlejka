@@ -119,6 +119,30 @@ def test_same_named_takes_exported_one_at_a_time_keep_their_folders(tmp_path):
         config.set_sessions_dir(prev)
 
 
+@pytest.mark.parametrize("size, long_side, expected", [
+    ("479x361", 640, (478, 360)),     # odd source smaller than the long side
+    ("361x479", 640, (360, 478)),     # the same, portrait
+    ("640x360", 401, (400, 226)),     # odd long side
+])
+def test_scaled_proxies_and_exports_have_even_sizes(tmp_path, size, long_side, expected):
+    """libx264 refuses odd yuv420p sizes, so neither a proxy nor an export may keep one."""
+    if not config.ffmpeg_path():
+        pytest.skip("needs ffmpeg")
+    src = tmp_path / "src.mp4"
+    subprocess.run([config.ffmpeg_path(), "-v", "error", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=30:duration=0.2",
+                    "-c:v", "mpeg4", str(src)], capture_output=True, check=True)
+    proxy = tmp_path / "proxy.mp4"
+    rc, err = ff.run_progress(ff.proxy_args(src, proxy, long_side, False), 0.2)
+    assert rc == 0, err
+    out = tmp_path / "export.mp4"
+    r = ff.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-vf", exporter.scale_filter(long_side) + ",format=yuv420p"]
+               + exporter.encoder_args({"crf": 23}) + [out], timeout=60)
+    assert r.returncode == 0, r.stderr
+    for path in (proxy, out):
+        info = video_stream_info(path)
+        assert (info["width"], info["height"]) == expected
+
+
 @pytest.fixture(scope="module")
 def exported(synced):
     store, name, gt = synced
