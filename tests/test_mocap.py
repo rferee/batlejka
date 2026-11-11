@@ -518,6 +518,25 @@ def test_take_detail_and_blend(fake):
     assert d["quality"] is None and d["files"] == [] and d["info"] is None
 
 
+def test_open_blend_refuses_a_linked_blend(fake, monkeypatch):
+    """A shared session folder could carry take.blend -> payload.exe: opening it would run the program."""
+    client, _, paths = fake
+    opened = []
+    monkeypatch.setattr(config, "open_in_os", opened.append)
+    take = paths.output / "jump"
+    (take / "jump.blend").write_bytes(b"BLENDER")
+    r = client.post(f"/api/sessions/{NAME}/mocap/takes/t2/open_blend")
+    assert r.status_code == 200 and opened == [take / "jump.blend"]
+    (take / "jump.blend").unlink()
+    (take / "payload.exe").write_bytes(b"MZ")
+    try:
+        (take / "jump.blend").symlink_to(take / "payload.exe")
+    except OSError:
+        pytest.skip("can't create symlinks here")
+    assert client.post(f"/api/sessions/{NAME}/mocap/takes/t2/open_blend").status_code == 404
+    assert len(opened) == 1
+
+
 # --------------------------------------------------------------------------- processing settings
 
 def test_params_normalize():

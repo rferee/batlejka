@@ -94,6 +94,31 @@ def test_source_file_stays_inside_source(tmp_path):
         config.set_sessions_dir(prev)
 
 
+def test_file_ids_from_disk_never_leave_preprocess(tmp_path):
+    """File ids name cache files that a scan deletes: one from a session.json made elsewhere
+    can't point outside .preprocess/."""
+    import json
+
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path / "sessions")
+        st = SessionStore()
+        paths = st.create("s")
+        victim = tmp_path / "victim.jpg"            # thumbs/../../../../victim.jpg
+        victim.write_bytes(b"keep me")
+        paths.json.parent.mkdir(parents=True)
+        good = {"id": file_id("gone.mov"), "rel": "gone.mov"}
+        paths.json.write_text(json.dumps({"files": [{"id": "../../../../victim", "rel": "x.mov"}, {"rel": "y.mov"},
+                                                    {"id": good["id"] + "\n", "rel": "z.mov"}, good]}))
+        assert [f["id"] for f in st.load("s")["files"]] == [good["id"]]
+        pipeline.scan(st, "s")                      # source/ is empty: every record's caches are deleted
+        assert victim.read_bytes() == b"keep me" and st.load("s")["files"] == []
+    finally:
+        config.set_sessions_dir(prev)
+
+
 @pytest.mark.parametrize("given,expected", [
     ({"layout": "x", "encoder": "av1", "nvenc_preset": "p9"}, {"layout": "freemocap", "encoder": "libx264", "nvenc_preset": "p5"}),
     ({"crf": "x"}, {"crf": 17}), ({"crf": 99}, {"crf": 51}), ({"crf": -3}, {"crf": 0}),

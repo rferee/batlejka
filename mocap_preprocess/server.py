@@ -23,7 +23,7 @@ from .routes_mocap import router as mocap_router
 from .routes_previews import router as previews_router
 from .routes_setup import router as setup_router
 from .routes_skeleton import router as skeleton_router
-from .session_store import InvalidName, SessionNotFound, validate_fid, validate_session_name
+from .session_store import PLAIN_ID, InvalidName, SessionNotFound, validate_fid, validate_session_name
 
 
 aio_fix.install()     # dropped video connections: no tracebacks, no leaked sockets
@@ -476,9 +476,6 @@ def _media_file(path: Path, media_type: str) -> FileResponse:
 _MEDIA = {"thumb": ("jpg", "image/jpeg"), "proxy": ("mp4", "video/mp4"), "wave": ("json", "application/json")}
 
 
-_PLAIN_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")   # take and camera ids (t12, c2)
-
-
 @app.get("/media/{s}/preview/{take_id}/{filename}")
 def media_preview(s: str, take_id: str, filename: str):
     """A Cut Takes preview (previews.py): .preprocess/previews/<take id>/<camera id>.mp4."""
@@ -486,7 +483,7 @@ def media_preview(s: str, take_id: str, filename: str):
     stem, dot, ext = filename.rpartition(".")
     if not dot or ext != "mp4":
         raise HTTPException(404, "not found")
-    if not (_PLAIN_ID.match(take_id) and _PLAIN_ID.match(stem)):
+    if not (PLAIN_ID.match(take_id) and PLAIN_ID.match(stem)):
         raise HTTPException(404, "not found")
     path = previews.preview_path(store.paths(name), take_id, stem)
     if not path.is_file():

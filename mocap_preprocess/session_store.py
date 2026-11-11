@@ -19,6 +19,7 @@ SESSION_VERSION = 1
 
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _FID_RE = re.compile(r"^f_[0-9a-f]{10}$")
+PLAIN_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")   # take and camera ids (t12, c2)
 _RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
 
 
@@ -203,6 +204,10 @@ def _normalize(data: dict, name: str) -> dict:
     mocap.setdefault("takes", {})
     _migrate_mocap(mocap)
     data["name"] = name
+    # file ids name cache files (thumbs/<id>.jpg, ...) that a scan deletes: a session.json from
+    # elsewhere could otherwise point them outside .preprocess/; the app only makes f_<hex> ids
+    data["files"] = [f for f in data["files"] if isinstance(f, dict) and isinstance(f.get("id"), str)
+                     and _FID_RE.fullmatch(f["id"])]
     for f in data["files"]:
         f.setdefault("assets", {})
         for k in ("thumb", "features", "audio", "wave", "proxy"):

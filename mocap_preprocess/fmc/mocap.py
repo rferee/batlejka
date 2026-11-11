@@ -977,10 +977,11 @@ def take_detail(store, name: str, take_id: str) -> dict:
 
 
 def blend_path(store, name: str, take_id: str) -> Path:
-    """The take's exported .blend, checked to be inside its folder."""
+    """The take's exported .blend, checked to be inside its folder and not a link (a
+    take.blend linked to a program would open, that is run, the program)."""
     entry, _ = find_take(store, name, take_id)
     take_dir = entry["path"].resolve()
-    blend = next(iter(sorted(take_dir.glob("*.blend"))), None)
+    blend = next((p for p in sorted(take_dir.glob("*.blend")) if not p.is_symlink()), None)
     if blend is None or blend.resolve().parent != take_dir:
         raise MocapError("this take has no .blend: tick Export .blend and process it again")
-    return blend.resolve()
+    return blend

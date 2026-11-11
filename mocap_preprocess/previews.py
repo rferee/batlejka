@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from . import ffmpeg_tools as ff
 from .fmc import mocap
-from .session_store import write_json_atomic
+from .session_store import PLAIN_ID, write_json_atomic
 
 CHARUCO_DIR = "charuco_annotated_videos"     # <stem>_charuco.mp4, from FreeMoCap's calibration
 ANNOTATED_DIR = "annotated_videos"           # <stem>_mediapipe.mp4 (or another tracker), from processing
@@ -46,6 +46,10 @@ def preview_path(paths, tid: str, cid: str) -> Path:
     return paths.pre / "previews" / tid / f"{cid}.mp4"
 
 
+def _plain(v) -> bool:
+    return isinstance(v, str) and PLAIN_ID.fullmatch(v) is not None
+
+
 def takes(paths, data: dict) -> list[dict]:
     """Every exported take FreeMoCap worked on: ``{take_id, kind, start, end, cameras}``, kind
     ``calibration`` (a calibrated profile's take, or one with board videos) or ``mocap``;
@@ -57,7 +61,9 @@ def takes(paths, data: dict) -> list[dict]:
     for e in mocap.exported_takes(paths, data):
         info, take_dir = e["info"], e["path"]
         tid = info["id"]
-        cams = [c for c in info.get("cameras") or [] if c.get("output") and c.get("camera_id")]
+        if not _plain(tid):          # take_info.json is read from disk: its ids name the preview files
+            continue
+        cams = [c for c in info.get("cameras") or [] if c.get("output") and _plain(c.get("camera_id"))]
         found = {}
         for kind in ("calibration", "mocap"):
             found[kind] = {}

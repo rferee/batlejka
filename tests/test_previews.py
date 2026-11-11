@@ -144,3 +144,30 @@ def test_full_quality_frames(session):
     r = client.get(f"/api/sessions/{NAME}/files/f_0123456789/frame?t=5")
     assert r.status_code == 200 and png_size(r.content) == (240, 320)
     assert client.get(f"/api/sessions/{NAME}/files/f_nope/frame?t=0").status_code == 404
+
+
+def test_take_info_ids_never_leave_the_previews_folder(tmp_path):
+    """take_info.json is read from disk: a take or camera id that isn't a plain name would
+    put the preview (and its sidecar) somewhere else, so that take or camera is left out."""
+    from mocap_preprocess import previews
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path / "sessions")
+        st = SessionStore()
+        paths = st.create("s")
+        for dname, tid, cams in (("evil", str(tmp_path / "abs" / "x"), [("c0", "A")]),
+                                 ("ok", "t5", [("c0", "A"), ("../../c1", "B"), (7, "C")])):
+            vids = paths.output / dname / "annotated_videos"
+            vids.mkdir(parents=True)
+            for _, cam in cams:
+                (vids / f"{cam}_synced_mediapipe.mp4").write_bytes(b"\0")
+            (paths.output / dname / "take_info.json").write_text(json.dumps({
+                "take": dname, "id": tid, "start": 0.0, "end": 1.0, "layout": "freemocap",
+                "cameras": [{"camera_id": cid, "name": cam, "output": f"synchronized_videos/{cam}_synced.mp4"}
+                            for cid, cam in cams]}))
+        listed = previews.takes(paths, st.load("s"))
+        assert [(t["take_id"], sorted(t["cameras"])) for t in listed] == [("t5", ["c0"])]
+        assert listed[0]["cameras"]["c0"]["out"] == paths.pre / "previews" / "t5" / "c0.mp4"
+    finally:
+        config.set_sessions_dir(prev)
