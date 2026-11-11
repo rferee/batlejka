@@ -206,6 +206,7 @@ export const ReviewScreen = {
     this.onKey = (e) => this.key(e);
     window.addEventListener('keydown', this.onKey);
     this.sideSel = null;    // reveal the selected take (e.g. picked on Export) once
+    if (this.previewsFor !== S.name) this.previews = null;   // another session's, opened while away
     this.adopt();
     this.renderAll();
     this.loadPreviews();
@@ -225,6 +226,7 @@ export const ReviewScreen = {
     clearTimeout(this.deferTimer);
     this.sideTop = 0;
     this.previews = null;
+    this.previewsFor = null;    // the next update loads the new session's
     leaveTakes();
   },
   /** True while the user is mid-gesture or typing — a re-render would lose it. */
@@ -241,6 +243,7 @@ export const ReviewScreen = {
     }
     this.adopt();
     this.renderAll();
+    if (this.previewsFor !== S.name) this.loadPreviews();
   },
   onJobs(list, finished = []) {
     this.renderTransportButtons();
@@ -254,6 +257,7 @@ export const ReviewScreen = {
   /** FreeMoCap's annotated videos per take (GET /previews): colours the takes, feeds Preview. */
   async loadPreviews() {
     const name = S.name;
+    this.previewsFor = name;
     try {
       const d = await GET(sUrl('/previews'));
       if (name !== S.name || !isMounted(this)) return;

@@ -185,19 +185,23 @@ export const MocapScreen = {
     if (this.loading) { this.again = true; return; }
     const name = S.name;
     this.loading = true;
+    let stale = false;     // another session was opened meanwhile: this answer is the old one's
     try {
       const d = await GET(sUrl('/mocap'));
-      if (name !== S.name) return;
-      this.adopt(d, name);
-      this.error = null;
-      if (!activeJob('mocap_process')) this.live = null;
+      stale = name !== S.name;
+      if (!stale) {
+        this.adopt(d, name);
+        this.error = null;
+        if (!activeJob('mocap_process')) this.live = null;
+      }
     } catch (e) {
-      if (name !== S.name) return;
-      this.error = e.message;
+      stale = name !== S.name;
+      if (!stale) this.error = e.message;
     } finally {
       this.loading = false;
     }
-    if (this.again) { this.again = false; this.load(); return; }
+    if (this.again) { this.again = false; this.load(); return; }    // e.g. the new session's load
+    if (stale) return;
     if (this.typing()) this.deferred = true;
     else this.render();
   },
