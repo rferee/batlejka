@@ -1,6 +1,7 @@
-fastapi>=0.115
+fastapi>=0.132      # 0.132 stopped reading a body without a JSON Content-Type as JSON (a cross-site no-cors fetch sends one)
 starlette>=0.49.1   # FileResponse answers Range requests (video seeking) since 0.41; 0.49.1 fixed CVE-2025-62727 in that parser
 uvicorn>=0.27
+h11>=0.16           # uvicorn's HTTP parser; 0.16.0 fixed GHSA-vqfr-h8mv-ghfj (request smuggling via chunked bodies)
 numpy>=1.24
 scipy>=1.10
 uv==0.11.32
