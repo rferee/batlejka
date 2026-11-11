@@ -73,6 +73,32 @@ def placed_video_files(data: dict) -> list[dict]:
     return [f for f in video_files(data) if f.get("offset") is not None]
 
 
+def list_source_files(source: Path, errors: list[str] | None = None) -> list[dict]:
+    """Video files under ``source``; what couldn't be read (a folder, a file's
+    size) is appended to ``errors`` instead of being skipped silently."""
+    out = []
+    if not source.is_dir():
+        return out
+
+    def failed(e: OSError) -> None:
+        if errors is not None:
+            errors.append(f"{e.filename}: {e.strerror or e}")
+    for root, dirs, files in os.walk(source, onerror=failed):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for fn in sorted(files):
+            if fn.startswith(".") or os.path.splitext(fn)[1].lower() not in config.VIDEO_EXTS:
+                continue
+            full = Path(root) / fn
+            try:
+                st = full.stat()
+            except OSError as e:
+                failed(e)
+                continue
+            rel = full.relative_to(source).as_posix()
+            out.append({"rel": rel, "path": full, "size": st.st_size, "mtime": round(st.st_mtime, 3)})
+    return out
+
+
 class SessionPaths:
     def __init__(self, name: str):
         name = validate_session_name(name)
@@ -311,18 +337,7 @@ class SessionStore:
                 validate_session_name(d.name)
             except InvalidName:
                 continue
-            n_files, size = 0, 0
-            src = d / "source"
-            if src.is_dir():
-                for root, dirs, files in os.walk(src):
-                    dirs[:] = [x for x in dirs if not x.startswith(".")]
-                    for fn in files:
-                        if os.path.splitext(fn)[1].lower() in config.VIDEO_EXTS:
-                            n_files += 1
-                            try:
-                                size += os.path.getsize(os.path.join(root, fn))
-                            except OSError:
-                                pass
+            entries = list_source_files(d / "source")     # what scan would find
             state = {}
             sj = d / ".preprocess" / "session.json"
             if sj.exists():
@@ -333,8 +348,8 @@ class SessionStore:
                     state = {}
             out.append({
                 "name": d.name,
-                "n_source_files": n_files,
-                "size": size,
+                "n_source_files": len(entries),
+                "size": sum(e["size"] for e in entries),
                 "processed": bool(state.get("processed_at")),
                 "synced": bool(state.get("synced_at")),
                 "exported": bool(state.get("exported_at")),

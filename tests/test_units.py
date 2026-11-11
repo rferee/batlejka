@@ -167,6 +167,26 @@ def test_scan_keeps_the_session_when_source_is_missing_or_unreadable(tmp_path, m
         config.set_sessions_dir(prev)
 
 
+def test_home_counts_the_files_scan_finds(tmp_path):
+    """A card copied from a Mac brings ._clip.mp4 AppleDouble files: scan skips them, so Home does too."""
+    from mocap_preprocess import config
+    from mocap_preprocess.session_store import SessionStore
+    prev = config.sessions_dir()
+    try:
+        config.set_sessions_dir(tmp_path / "sessions")
+        st = SessionStore()
+        paths = st.create("s").ensure()
+        (paths.source / "a.mp4").write_bytes(b"0" * 10)
+        (paths.source / "._a.mp4").write_bytes(b"0" * 4096)
+        (paths.source / ".Trashes").mkdir()
+        (paths.source / ".Trashes" / "b.mp4").write_bytes(b"0" * 5)
+        assert [e["rel"] for e in pipeline.list_source_files(paths.source)] == ["a.mp4"]
+        s = next(s for s in st.list_sessions() if s["name"] == "s")
+        assert s["n_source_files"] == 1 and s["size"] == 10
+    finally:
+        config.set_sessions_dir(prev)
+
+
 def test_two_jobs_writing_the_same_audio_cache_both_succeed(tmp_path, monkeypatch):
     """Process and Sync can both extract a file's missing audio at once: each writes a temp
     file of its own, so neither replace finds the other's already moved away."""
