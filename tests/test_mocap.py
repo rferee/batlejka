@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -265,6 +266,45 @@ def test_leftovers_block_until_deleted(fake):
     assert j["status"] == "done", j
     assert not (paths.output / "walk" / "synchronized_videos" / "D_synced.mp4").exists()
     assert any("deleted leftover" in e["msg"] for e in j["log"])
+
+
+def test_export_and_freemocap_dont_overlap_on_a_take(fake, monkeypatch):
+    """A take being processed or calibrated isn't re-exported (its results would be stamped
+    with the new videos and look current), and FreeMoCap doesn't start while an export runs."""
+    from mocap_preprocess import exporter
+    from mocap_preprocess.app_state import jobs
+
+    client, _, _ = fake
+    monkeypatch.setattr(server, "_require_tools", lambda: None)
+    monkeypatch.setattr(exporter, "export", lambda *a: {"exported": a[3]})
+
+    def export(tids):
+        return client.post(f"/api/sessions/{NAME}/export", json={"take_ids": tids, "camera_ids": ["c0"]})
+    release = threading.Event()
+    busy = jobs.start(mocap.JOB_PROCESS, NAME, lambda j: release.wait(10),
+                      live={"takes": {"t2": {"status": "running"}, "t3": {"status": "done"}}})
+    try:
+        r = export(["t3", "t2"])
+        assert r.status_code == 409 and "jump" in r.json()["detail"] and "walk" not in r.json()["detail"], r.text
+        j = wait(client, export(["t3"]).json())                  # t3's run is over: no conflict
+        assert j["status"] == "done" and j["result"] == {"exported": ["t3"]}
+    finally:
+        release.set()
+        wait_job(busy.id, 10)
+
+    release = threading.Event()
+    busy = jobs.start("export", NAME, lambda j: release.wait(10))
+    try:
+        r = client.post(f"/api/sessions/{NAME}/mocap/process", json={"take_ids": ["t2"]})
+        assert r.status_code == 409 and "export" in r.json()["detail"], r.text
+        r = client.post(f"/api/sessions/{NAME}/mocap/calibrate",
+                        json={"take_id": "t1", "board": "7x5", "square_mm": 39, "groundplane": False})
+        assert r.status_code == 409 and "export" in r.json()["detail"], r.text
+        assert client.get(f"/api/sessions/{NAME}/mocap").json()["profiles"] == []   # the form's profile isn't kept
+    finally:
+        release.set()
+        wait_job(busy.id, 10)
+    assert calibrate(client)["status"] == "done"
 
 
 def test_process_writes_mocap_info_and_goes_stale(fake):

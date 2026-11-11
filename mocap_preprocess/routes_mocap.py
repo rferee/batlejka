@@ -15,6 +15,7 @@ from .routes_previews import after_mocap_job
 router = APIRouter()
 
 CALIBRATE, PROCESS = mocap.JOB_CALIBRATE, mocap.JOB_PROCESS
+EXPORT = "export"     # server.py's export job: it rewrites the take folders FreeMoCap reads
 
 
 def _freemocap() -> dict:
@@ -125,6 +126,8 @@ def _start_calibration(name: str, pid: str, delete_leftovers: bool) -> dict:
         _leftover_conflict({take["take_id"]: take["leftovers"]}, "the calibration")
     if jobs.active(name, PROCESS):
         raise HTTPException(409, "mocap processing is running — wait for it or cancel it first")
+    if jobs.active(name, EXPORT):
+        raise HTTPException(409, "an export is running — wait for it or cancel it first")
     delete = list(take["leftovers"])
 
     def run(job):
@@ -244,6 +247,8 @@ def process(s: str, payload: dict = Body(...)):
     data = store.load(name)
     if jobs.active(name, CALIBRATE):
         raise HTTPException(409, "a calibration is running — wait for it first")
+    if jobs.active(name, EXPORT):
+        raise HTTPException(409, "an export is running — wait for it or cancel it first")
 
     params = mocap.effective_params(data)
     try:

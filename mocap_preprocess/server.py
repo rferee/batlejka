@@ -22,6 +22,7 @@ from .fmc import mocap
 from .jobs import JobConflict
 from .routes_frames import router as frames_router
 from .routes_mocap import router as mocap_router
+from .routes_previews import _busy_takes
 from .routes_previews import router as previews_router
 from .routes_setup import router as setup_router
 from .routes_skeleton import router as skeleton_router
@@ -445,6 +446,10 @@ def export(s: str, payload: dict = Body(...)):
         data["export_options"] = opts
     if not take_ids or not camera_ids:
         raise HTTPException(400, "select at least one take and one camera")
+    busy = set(take_ids) & _busy_takes(name)    # its videos would change under FreeMoCap's results
+    if busy:
+        names = ", ".join(sorted(next((t["name"] for t in data["takes"] if t["id"] == tid), tid) for tid in busy))
+        raise HTTPException(409, f"FreeMoCap is processing or calibrating {names} — wait for it or cancel it first")
     job = jobs.start("export", name, lambda j: exporter.export(store, name, j, take_ids, camera_ids, opts),
                      label="Export takes")
     return job.info(log_since=0)
