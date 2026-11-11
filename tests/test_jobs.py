@@ -111,6 +111,42 @@ def test_history_is_capped_when_jobs_start():
     assert live.id in kept and len(kept) == 3 and done[1].id not in kept
 
 
+def test_reads_while_other_threads_start_and_prune_jobs():
+    """The UI polls the job list while job threads start more jobs (and starting prunes old
+    ones): a read must never see the dict change under it ("changed size during iteration")."""
+    import sys
+    import time
+
+    m = JobManager(max_history=5)
+    errors, stop = [], threading.Event()
+
+    def starter():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            m.start(f"k{threading.get_ident()}-{n}", None, lambda j: None)   # a kind of its own: no conflict
+
+    def reader():
+        while not stop.is_set():
+            try:
+                m.list("s"), m.list(), m.list(global_only=True), m.active(None), m.get("x"), m.cancel("x")
+            except RuntimeError as e:
+                errors.append(e)
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)     # switch threads as often as possible
+    try:
+        threads = [threading.Thread(target=f) for f in (starter, starter, reader, reader)]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)
+        stop.set()
+        for t in threads:
+            t.join(10)
+    finally:
+        sys.setswitchinterval(old)
+    assert not errors, errors[:1]
+
+
 def test_cancelled_exception_from_a_tool_counts_as_cancel():
     def run(job):
         raise Cancelled()

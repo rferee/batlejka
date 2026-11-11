@@ -153,26 +153,31 @@ class JobManager:
             for j in sorted(done, key=lambda x: x.created)[: len(done) - self._max_history]:
                 self._jobs.pop(j.id, None)
 
+    def _all(self) -> list[Job]:
+        """A snapshot of the jobs: other threads start (and prune) jobs while requests read them."""
+        with self._lock:
+            return list(self._jobs.values())
+
     def get(self, job_id: str) -> Job | None:
-        return self._jobs.get(job_id)
+        with self._lock:
+            return self._jobs.get(job_id)
 
     def list(self, session: str | None = None, *, global_only: bool = False) -> list[Job]:
         """``session``: that session's jobs plus the global ones (session None); ``global_only``:
         just the global ones; neither: every job. Oldest first."""
+        jobs = self._all()
         if global_only:
-            jobs = [j for j in self._jobs.values() if j.session is None]
+            jobs = [j for j in jobs if j.session is None]
         elif session is not None:
-            jobs = [j for j in self._jobs.values() if j.session in (session, None)]
-        else:
-            jobs = list(self._jobs.values())
+            jobs = [j for j in jobs if j.session in (session, None)]
         return sorted(jobs, key=lambda j: j.created)
 
     def active(self, session: str | None, kind: str | None = None) -> list[Job]:
-        return [j for j in self._jobs.values()
+        return [j for j in self._all()
                 if j.session == session and j.status in ACTIVE and (kind is None or j.kind == kind)]
 
     def cancel(self, job_id: str) -> Job | None:
-        job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is not None and job.status in ACTIVE:
             job.cancel_event.set()
         return job
