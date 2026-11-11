@@ -50,7 +50,7 @@ class FakeRunner:
         self.fail_calibration = False
         self.adjusted = []       # what the headless script reports as rescaled per take
 
-    def __call__(self, cmd, args=(), job=None, on_event=None, on_tqdm=None, log_text=True):
+    def __call__(self, cmd, args=(), job=None, on_event=None, on_tqdm=None):
         args = [str(a) for a in args]
         self.calls.append((cmd, args))
         ev = on_event or (lambda e: None)

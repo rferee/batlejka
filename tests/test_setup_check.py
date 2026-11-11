@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 
 import pytest
@@ -80,6 +81,12 @@ def test_existing_session_keeps_its_encoder(tools):
     assert data["export_options"]["encoder"] == "libx264"
 
 
+def test_tool_version_reads_the_first_line_of_version():
+    assert setup_check.tool_version(None) == {"path": None, "version": None}   # not on PATH
+    t = setup_check.tool_version(sys.executable)
+    assert t["path"] == sys.executable and t["version"].startswith("Python 3.")
+
+
 # ---------------------------------------------------------------------------
 # /api/setup
 
@@ -88,7 +95,7 @@ def fake_machine(monkeypatch, *, gpu=GPU, nvenc_ok=True, fmc=None, ready=True):
     monkeypatch.setattr(setup_check, "ffmpeg_info", lambda: dict(FFM))
     monkeypatch.setattr(setup_check, "nvidia_gpu", lambda: gpu)
     monkeypatch.setattr(setup_check, "run_gpu_probe", fake_probe(calls, nvenc_ok=nvenc_ok))
-    monkeypatch.setattr(setup_check, "tool_version", lambda name, exe: {"path": f"C:/bin/{name}.exe", "version": f"{name} 1.0"})
+    monkeypatch.setattr(setup_check, "tool_version", lambda exe: {"path": "C:/bin/tool.exe", "version": "tool 1.0"})
     monkeypatch.setattr(setup_check, "uv_path", lambda: "C:/bin/uv.exe")
     status = fmc or {
         "version": "v1.8.2", "state": "ready", "detail": "ready", "error": None, "installed_at": 1.0,

@@ -41,10 +41,6 @@ def python_dir() -> Path:
     return config.tools_dir() / "python"
 
 
-def home_dir() -> Path:
-    return config.fmc_dir() / "home"
-
-
 def logs_dir() -> Path:
     return config.fmc_dir() / "logs"
 

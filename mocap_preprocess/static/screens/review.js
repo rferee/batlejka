@@ -1,6 +1,6 @@
 // Review screen, plus the takes / export-options store it shares with Export.
 import { openFrame } from '../frameview.js';
-import { applyFit, Grid } from '../grid.js';
+import { Grid } from '../grid.js';
 import { Timeline } from '../timeline.js';
 import {
   GET, METHOD_COLORS, POST, PUT, S, activeJob, api, basename,

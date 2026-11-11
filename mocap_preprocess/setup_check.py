@@ -87,7 +87,7 @@ def nvidia_gpu() -> dict | None:
             "memory": parts[2] if len(parts) > 2 else None}
 
 
-def tool_version(name: str, exe: str | None) -> dict:
+def tool_version(exe: str | None) -> dict:
     if not exe:
         return {"path": None, "version": None}
     line = _first_line(_run([exe, "--version"], 20))
@@ -272,8 +272,8 @@ def _collect(refresh: bool) -> dict:
     ffm = ffmpeg_info()
     gpu = nvidia_gpu()
     probe = gpu_probe(ffm, gpu, refresh=refresh)
-    git = tool_version("git", shutil.which("git"))
-    uv = tool_version("uv", uv_path())
+    git = tool_version(shutil.which("git"))
+    uv = tool_version(uv_path())
     return {"at": time.time(), "ffmpeg": ffm, "gpu": gpu, "probe": probe, "git": git, "uv": uv}
 
 

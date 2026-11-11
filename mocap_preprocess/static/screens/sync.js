@@ -125,7 +125,6 @@ export const SyncScreen = {
     r.innerHTML = '';
     if (!S.data) return;
     const vids = videoFiles();
-    const st = S.data.settings;
     const manual = vids.filter((f) => f.sync?.method === 'manual').length;
     this.vizHead = h('div', { class: 'viz-head' });
     this.progress = h('div', { class: 'viz-progress' });
@@ -160,7 +159,7 @@ export const SyncScreen = {
     const n = this.viz ? this.viz.counts() : {};
     this.vizHead.innerHTML = '';
     this.vizHead.append(
-      h('div', { class: 'vsteps' }, SYNC_PHASES.map(([id, label, desc], i) => {
+      h('div', { class: 'vsteps' }, SYNC_PHASES.map(([, label, desc], i) => {
         const done = phase === 'done' || (idx >= 0 && i < idx);
         return h('span', { class: `vstep${done ? ' done' : ''}${i === idx ? ' on' : ''}` },
           h('b', null, done ? icon('check') : String(i + 1)), tip(label, desc));

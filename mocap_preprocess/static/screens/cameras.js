@@ -144,7 +144,6 @@ export const CamerasScreen = {
     this.ro.disconnect();
     if (!S.data) return;
     const vids = videoFiles();
-    const n = this.cams.length;
     const names = {};
     for (const c of this.cams) names[c.name] = (names[c.name] || 0) + 1;
     const orphans = vids.filter((f) => !this.cams.some((c) => c.id === this.camOf(f)));

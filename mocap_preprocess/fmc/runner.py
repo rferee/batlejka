@@ -129,7 +129,6 @@ def run_headless(
     job=None,
     on_event: Callable[[dict], None] | None = None,
     on_tqdm: Callable[[dict], None] | None = None,
-    log_text: bool = True,
 ) -> dict:
     """Run one fmc_headless.py command to the end and return its ``FMC_RESULT`` dict
     (``ok`` plus the command's fields), with ``returncode`` and ``log`` (the log file) added.
@@ -183,7 +182,7 @@ def run_headless(
                     on_tqdm(value)
             elif line.strip():
                 tail.append(line)
-                if job is not None and log_text:
+                if job is not None:
                     job.log(line, _text_level(line, stream))
 
         def pump(pipe, stream: str) -> None:

@@ -84,9 +84,6 @@ class Cluster:
     def conflicts(self, f: dict) -> bool:
         return any(overlaps(f, m) for m in self.members)
 
-    def earliest(self):
-        return min(_sort_key(m) for m in self.members)
-
 
 def split_partition(files: list[dict], feats: dict[str, np.ndarray | None]) -> list[Cluster]:
     clusters: list[Cluster] = []
