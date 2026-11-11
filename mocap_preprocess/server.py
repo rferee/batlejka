@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import sys
@@ -205,13 +206,26 @@ def scan_session(s: str):
 
 
 SAMPLE_RATES = (4000, 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
+MAX_FPS = 1000
+
+
+def _number(value, what: str, kind=float):
+    """``value`` as a finite int or float, else 400. JSON allows NaN and Infinity, but a
+    session holding one can't be sent back as JSON: every later GET would fail."""
+    try:
+        v = kind(value)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(400, f"invalid {what}: {value!r}")
+    if isinstance(v, float) and not math.isfinite(v):     # an int always is (and may not fit a float)
+        raise HTTPException(400, f"invalid {what}: {value!r}")
+    return v
 
 
 def _apply_settings(data: dict, payload: dict) -> None:
     st = data["settings"]
     if "target_fps" in payload:
         fps = ff.parse_fraction(str(payload["target_fps"]).strip())
-        if fps is None:
+        if fps is None or not 1 <= fps <= MAX_FPS:
             raise HTTPException(400, f"invalid fps: {payload['target_fps']}")
         fps_s = ff.frac_str(fps)
         if fps_s != st["target_fps"]:
@@ -222,17 +236,17 @@ def _apply_settings(data: dict, payload: dict) -> None:
         if not st["target_fps_user_set"]:
             pipeline.prefill_target_fps(data)
     if "sync_sample_rate" in payload:
-        sr = int(payload["sync_sample_rate"])
+        sr = _number(payload["sync_sample_rate"], "sync_sample_rate", int)
         if sr not in SAMPLE_RATES:
             raise HTTPException(400, f"unsupported sample rate: {sr}")
         st["sync_sample_rate"] = sr
     if "proxy_long_side" in payload:
-        st["proxy_long_side"] = max(160, min(1920, int(payload["proxy_long_side"])))
+        st["proxy_long_side"] = max(160, min(1920, _number(payload["proxy_long_side"], "proxy_long_side", int)))
     if "hwaccel" in payload:
         st["hwaccel"] = bool(payload["hwaccel"])
     for key, lo, hi in (("sync_min_score", 0.0, 1.0), ("sync_min_ratio", 1.0, 100.0), ("sync_window", 0.2, 30.0)):
         if key in payload:
-            st[key] = max(lo, min(hi, float(payload[key])))
+            st[key] = max(lo, min(hi, _number(payload[key], key)))
 
 
 @app.put("/api/sessions/{s}/settings")
@@ -288,10 +302,12 @@ def put_cameras(s: str, payload: dict = Body(...)):
         old = {c["id"]: c for c in data["cameras"]}
         cams, ids = [], set()
         for c in cams_in:
+            if not isinstance(c, dict):
+                raise HTTPException(400, f"expected a camera object, got {c!r}")
             cid = str(c.get("id", ""))
             if not _CAM_ID.match(cid) or cid in ids:
                 raise HTTPException(400, f"bad camera id: {cid!r}")
-            rot = int(c.get("rotation", 0))
+            rot = _number(c.get("rotation", 0), "rotation", int)
             if rot not in (0, 90, 180, 270):
                 raise HTTPException(400, f"rotation must be 0/90/180/270, got {rot}")
             ids.add(cid)
@@ -301,7 +317,7 @@ def put_cameras(s: str, payload: dict = Body(...)):
         files = {f["id"]: f for f in data["files"]}
         for fid, cid in assignments.items():
             validate_fid(fid)
-            if fid not in files or cid not in ids:
+            if fid not in files or not isinstance(cid, str) or cid not in ids:
                 raise HTTPException(400, f"bad assignment {fid} -> {cid}")
             f = files[fid]
             prev = f.get("camera")
@@ -349,7 +365,9 @@ def put_offset(s: str, fid: str, payload: dict = Body(...)):
     validate_fid(fid)
     try:
         offset = float(payload["offset"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise HTTPException(400, "expected {offset: seconds}")
+    if not math.isfinite(offset):
         raise HTTPException(400, "expected {offset: seconds}")
     with store.edit(name) as data:
         f = next((x for x in data["files"] if x["id"] == fid), None)

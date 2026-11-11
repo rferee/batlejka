@@ -171,7 +171,8 @@ def test_scan_keeps_the_session_when_source_is_missing_or_unreadable(tmp_path, m
     ({"layout": "x", "encoder": "av1", "nvenc_preset": "p9"}, {"layout": "freemocap", "encoder": "libx264", "nvenc_preset": "p5"}),
     ({"crf": "x"}, {"crf": 17}), ({"crf": 99}, {"crf": 51}), ({"crf": -3}, {"crf": 0}),
     ({"long_side": "keep"}, {"long_side": 0}), ({"long_side": "0"}, {"long_side": 0}), ({"long_side": None}, {"long_side": 0}),
-    ({"long_side": "1280"}, {"long_side": 1280}),
+    ({"long_side": "1280"}, {"long_side": 1280}), ({"long_side": "abc"}, {"long_side": 0}), ({"long_side": -720}, {"long_side": 0}),
+    ({"long_side": float("inf")}, {"long_side": 0}), ({"crf": float("inf")}, {"crf": 17}), ({"parallel": float("nan")}, {"parallel": 1}),
     ({"parallel": "x"}, {"parallel": 1}), ({"parallel": 0}, {"parallel": 1}), ({"parallel": 9}, {"parallel": 3}),
     ({"audio": 0, "overwrite": ""}, {"audio": False, "overwrite": False}),
     ({"camera_ids": "c1"}, {}), ({"camera_ids": ["c1"]}, {"camera_ids": ["c1"]}),
@@ -183,7 +184,14 @@ def test_export_options_fall_back_to_defaults(given, expected):
         assert o[k] == v, k
     if "camera_ids" not in expected:
         assert "camera_ids" not in o
-    assert set(config.DEFAULT_EXPORT_OPTIONS) <= set(o)
+    assert set(config.DEFAULT_EXPORT_OPTIONS) <= set(o) <= set(config.DEFAULT_EXPORT_OPTIONS) | {"camera_ids"}
+
+
+def test_export_options_drop_unknown_keys_and_non_objects():
+    from mocap_preprocess import config, exporter
+    defaults = config.DEFAULT_EXPORT_OPTIONS
+    assert "bogus" not in exporter.normalize_options({"bogus": [1, 2], "crf": 20}, defaults)
+    assert exporter.normalize_options(["crf", 20], defaults) == exporter.normalize_options({}, defaults)
 
 
 # ------------------------------------------------------------------ correlation
@@ -333,6 +341,12 @@ def test_takes_validate():
     assert [t["id"] for t in out] == ["t1", "t2"] and out[1]["name"] == "walk" and out[0]["name"]
     with pytest.raises(ValueError):
         takes.validate([{"id": "t1", "name": "x", "start": 3, "end": 3}])
+    # what JSON lets through but can't send back out, and items that aren't takes: ValueError (400), not a crash
+    for bad in ([{"id": "t1", "start": 1, "end": float("inf")}], [{"id": "t1", "start": float("-inf"), "end": 2}],
+                [{"id": "t1", "start": float("nan"), "end": 2}], [{"id": "t1", "start": 10 ** 400, "end": 2}],
+                [{"id": "t1", "start": None, "end": 2}], [{"id": "t1", "end": 2}], ["t1"], [None]):
+        with pytest.raises(ValueError):
+            takes.validate(bad)
 
 
 def test_take_ids_count_on_from_take_seq():

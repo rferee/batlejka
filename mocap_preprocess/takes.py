@@ -1,6 +1,7 @@
 """Take handling: auto-detection from clip clusters (§6.7) and validation."""
 from __future__ import annotations
 
+import math
 import re
 
 from .session_store import placed_video_files
@@ -76,8 +77,8 @@ def _fresh_ids(take_seq: int):
 def validate(takes_in, take_seq: int = 0) -> list[dict]:
     """New and invalid ids get fresh numbers above ``take_seq``; ids the client sends are
     kept even when they're at or below it, since undo brings deleted takes back as they were."""
-    if not isinstance(takes_in, list):
-        raise ValueError("takes must be a list")
+    if not isinstance(takes_in, list) or not all(isinstance(t, dict) for t in takes_in):
+        raise ValueError("takes must be a list of objects")
     out, ids = [], set()
     sent = {str(x.get("id")) for x in takes_in}
     for i, t in enumerate(takes_in):
@@ -85,7 +86,12 @@ def validate(takes_in, take_seq: int = 0) -> list[dict]:
         if not _TID.match(tid) or tid in ids:
             tid = next(k for k in _fresh_ids(take_seq) if k not in ids and k not in sent)
         ids.add(tid)
-        start, end = float(t["start"]), float(t["end"])
+        try:
+            start, end = float(t["start"]), float(t["end"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise ValueError(f"take {t.get('name')!r}: start and end must be numbers")
+        if not (math.isfinite(start) and math.isfinite(end)):   # JSON can't carry them back out
+            raise ValueError(f"take {t.get('name')!r}: start and end must be finite")
         if not end > start:
             raise ValueError(f"take {t.get('name')!r}: end must be after start")
         name = str(t.get("name") or "").strip()[:80] or f"take_{i + 1:02d}"

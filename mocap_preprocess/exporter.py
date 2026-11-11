@@ -291,25 +291,31 @@ def build_joined_command(srcs: list[Path], out: Path, plan: CamPlan, fps: Fracti
 
 
 def normalize_options(options: dict, defaults: dict) -> dict:
+    """The export options with every value valid; keys other than the defaults' and
+    camera_ids are dropped (they'd be stored in the session as they came)."""
     o = dict(defaults)
-    o.update({k: v for k, v in (options or {}).items() if v is not None or k == "long_side"})
+    known = set(defaults) | {"camera_ids"}
+    o.update({k: v for k, v in (options if isinstance(options, dict) else {}).items()
+              if k in known and (v is not None or k == "long_side")})
     if o.get("layout") not in ("freemocap", "flat"):
         o["layout"] = "freemocap"
     if o.get("encoder") not in ("libx264", "h264_nvenc"):
         o["encoder"] = "libx264"
     try:
         o["crf"] = max(0, min(51, int(o.get("crf", 17))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         o["crf"] = 17
-    ls = o.get("long_side")
-    o["long_side"] = int(ls) if ls not in (None, "", "keep", 0, "0") else 0
+    try:        # 0, "", "keep", None: the source size
+        o["long_side"] = max(0, int(o.get("long_side") or 0))
+    except (TypeError, ValueError, OverflowError):
+        o["long_side"] = 0
     o["audio"] = bool(o.get("audio", True))
     o["overwrite"] = bool(o.get("overwrite", True))
     if o.get("nvenc_preset") not in NVENC_PRESETS:
         o["nvenc_preset"] = "p5"
     try:
         o["parallel"] = max(1, min(MAX_PARALLEL, int(o.get("parallel") or 1)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         o["parallel"] = 1
     if "camera_ids" in o and not isinstance(o["camera_ids"], list):
         o.pop("camera_ids")

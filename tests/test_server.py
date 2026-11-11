@@ -250,6 +250,57 @@ def test_new_takes_count_on_past_exported_ones(store):
         shutil.rmtree(config.sessions_dir() / name, ignore_errors=True)
 
 
+def test_bad_numbers_get_400_and_the_session_still_loads(store):
+    """JSON allows NaN, Infinity and huge numbers, but a session holding one can't be sent
+    back as JSON: they used to be saved, and then every GET of the session was a 500."""
+    import shutil
+
+    from mocap_preprocess import config, pipeline
+    from mocap_preprocess.session_store import file_id
+    client = TestClient(server.app, base_url="http://127.0.0.1:8765")
+    name = "test_bad_numbers"
+    base = f"/api/sessions/{name}"
+    shutil.rmtree(config.sessions_dir() / name, ignore_errors=True)
+
+    def put(path, raw):
+        return client.put(base + path, content=raw, headers={"Content-Type": "application/json"}).status_code
+    try:
+        assert client.post("/api/sessions", json={"name": name}).status_code == 200
+        fid = file_id("a.mov")
+        with store.edit(name) as d:
+            f = pipeline.new_file_record("a.mov", 10, 1.0)
+            f.update(probe={"duration": 5.0, "video": {"nominal_fps": "30"}}, camera="c1", offset=1.0)
+            d["files"] = [f]
+            d["cameras"] = [{"id": "c1", "name": "cam", "rotation": 0, "include": True}]
+        for fps in ("1e400", "1e-400", "0.5", "1001", "inf"):
+            assert put("/settings", f'{{"target_fps": "{fps}"}}') == 400, fps
+        for raw in ('{"sync_sample_rate": "abc"}', '{"sync_sample_rate": Infinity}', '{"proxy_long_side": "x"}',
+                    '{"proxy_long_side": NaN}', '{"sync_window": NaN}', '{"sync_min_score": Infinity}'):
+            assert put("/settings", raw) == 400, raw
+        huge = "1" + "0" * 400
+        assert put("/settings", f'{{"sync_sample_rate": {huge}}}') == 400
+        assert client.put(base + "/settings", content=f'{{"proxy_long_side": {huge}}}',
+                          headers={"Content-Type": "application/json"}).json()["settings"]["proxy_long_side"] == 1920
+        for raw in ('{"offset": NaN}', '{"offset": 1e999}', '{"offset": -Infinity}', '{"offset": 1' + "0" * 400 + "}"):
+            assert put(f"/files/{fid}/offset", raw) == 400, raw
+        for raw in ('[{"id": "t1", "name": "x", "start": 1, "end": Infinity}]', '["t1"]', '[{"id": "t1", "start": "a", "end": 2}]'):
+            assert put("/takes", raw) == 400, raw
+        for raw in ('{"cameras": ["c1"], "assignments": {}}', '{"cameras": [{"id": "c1", "rotation": "abc"}], "assignments": {}}',
+                    '{"cameras": [{"id": "c1", "rotation": Infinity}], "assignments": {}}',
+                    f'{{"cameras": [{{"id": "c1"}}], "assignments": {{"{fid}": ["c1"]}}}}'):
+            assert put("/cameras", raw) == 400, raw
+        o = client.put(base + "/export_options", content='{"long_side": -5, "crf": Infinity, "parallel": NaN, "x": NaN}',
+                       headers={"Content-Type": "application/json"}).json()["export_options"]
+        assert (o["long_side"], o["crf"], o["parallel"]) == (0, 17, 1) and "x" not in o
+        r = client.get(base)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["settings"]["target_fps"] == "30000/1001" and d["files"][0]["offset"] == 1.0 and d["takes"] == []
+        assert d["cameras"][0]["rotation"] == 0
+    finally:
+        shutil.rmtree(config.sessions_dir() / name, ignore_errors=True)
+
+
 def test_dropped_connection_still_closes_its_socket():
     import sys
     from asyncio import proactor_events
