@@ -250,6 +250,17 @@ export async function cancelJob(id) {
 }
 
 export const jobLogs = new Map(); // id -> {seq, lines}
+// The log panel and the Sync screen fetch a job's log at the same time, each from the seq it
+// read before asking: keep only entries newer than those held, and never move seq back.
+export function addJobLog(id, full) {
+  const have = jobLogs.get(id) || { seq: 0, lines: [] };
+  have.lines.push(...full.log.filter((l) => l.seq > have.seq));
+  if (full.log_seq >= have.seq) {
+    have.seq = full.log_seq;
+    have.status = full.status;
+  }
+  jobLogs.set(id, have);
+}
 async function renderJobLog() {
   const box = document.getElementById('joblog');
   box.hidden = !S.logOpen;
@@ -259,11 +270,7 @@ async function renderJobLog() {
     const have = jobLogs.get(j.id) || { seq: 0, lines: [] };
     if (have.seq >= j.log_seq && have.status === j.status) return;
     try {
-      const full = await GET(`/api/jobs/${j.id}?log_since=${have.seq}`);
-      have.lines.push(...full.log);
-      have.seq = full.log_seq;
-      have.status = full.status;
-      jobLogs.set(j.id, have);
+      addJobLog(j.id, await GET(`/api/jobs/${j.id}?log_since=${have.seq}`));
     } catch { /* job pruned */ }
   }));
   box.innerHTML = '';

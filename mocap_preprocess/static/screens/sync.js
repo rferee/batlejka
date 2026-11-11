@@ -1,7 +1,7 @@
 // Sync screen.
 import { SyncViz, snapshotFromSession, replayFrames } from '../syncviz.js';
 import {
-  GET, METHOD_COLORS, S, activeJob, basename, cameraById, cancelJob,
+  GET, METHOD_COLORS, S, activeJob, addJobLog, basename, cameraById, cancelJob,
   fmtOffset, h, icon, isActive, jobLogs, lastJob,
   pad2, pollSoon, startJob, tip, videoFiles,
   METHOD_LABEL,
@@ -77,11 +77,7 @@ export const SyncScreen = {
     const have = jobLogs.get(j.id) || { seq: 0, lines: [] };
     if (have.seq >= j.log_seq) return;
     try {
-      const full = await GET(`/api/jobs/${j.id}?log_since=${have.seq}`);
-      have.lines.push(...full.log);
-      have.seq = full.log_seq;
-      have.status = full.status;
-      jobLogs.set(j.id, have);
+      addJobLog(j.id, await GET(`/api/jobs/${j.id}?log_since=${have.seq}`));
     } catch { /* pruned */ }
   },
   // the live picture: the job publishes a snapshot, polled faster than the job list
@@ -94,10 +90,7 @@ export const SyncScreen = {
       const have = jobLogs.get(j.id) || { seq: 0, lines: [] };
       try {
         const full = await GET(`/api/jobs/${j.id}?log_since=${have.seq}&live=true`);
-        have.lines.push(...full.log);
-        have.seq = full.log_seq;
-        have.status = full.status;
-        jobLogs.set(j.id, have);
+        addJobLog(j.id, full);
         Object.assign(j, { progress: full.progress, message: full.message, log_seq: full.log_seq });
         if (full.live && this.viz) {
           this.lastLive = full.live;
