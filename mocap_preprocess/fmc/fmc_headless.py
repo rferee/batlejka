@@ -257,8 +257,10 @@ def prepare_take_calibration(take: Path, take_cams: list, toml_path: Path, sizes
             adjustments.append(note)
     reordered = take_cams != camera_names(calib)
     if reordered or adjustments:
-        # a subset, the same cameras in another order, or rescaled intrinsics: cam_0.. in the take's order
-        out = {f"cam_{i}": cams[name] for i, name in enumerate(take_cams)}
+        # a subset, the same cameras in another order, or rescaled intrinsics: cam_0.. in the take's order,
+        # zero-padded from 11 cameras on (cam_00..) since the sections are loaded sorted by key
+        width = len(str(len(take_cams) - 1))
+        out = {f"cam_{i:0{width}d}": cams[name] for i, name in enumerate(take_cams)}
         meta = dict(calib.get("metadata", {}))
         if reordered:
             meta["subset_of" if is_subset else "reordered_from"] = str(toml_path)

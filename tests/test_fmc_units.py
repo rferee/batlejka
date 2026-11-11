@@ -162,6 +162,23 @@ def test_intrinsics_follow_a_cameras_video_size(tmp_path, calib):
     assert out["cam_0"] == src["cam_2"] and out["cam_1"]["size"] == [960, 540]
 
 
+def test_eleven_and_more_cameras_keep_the_take_order(tmp_path):
+    """Sections are loaded in sorted key order, where cam_10 comes before cam_2: past ten
+    cameras the keys are zero-padded so the take's order survives."""
+    if toml is None:
+        pytest.skip("needs the toml package")
+    fmc = _headless()
+    names = [f"cam{k:02d}_synced" for k in range(12)]
+    src = tmp_path / "calibration_camera_calibration.toml"
+    with open(src, "w") as fh:
+        toml.dump({f"cam_{i}": _cam(n, i) for i, n in enumerate(names)}, fh)
+    take_cams = names[1:] + names[:1]              # another order than the calibration's: rewritten
+    path, subset, adjusted = fmc.prepare_take_calibration(_take(tmp_path, "take_6"), take_cams, src)
+    out = fmc.read_toml(path)
+    assert subset is False and fmc.camera_names(out) == take_cams
+    assert fmc.camera_keys(out)[:3] == ["cam_00", "cam_01", "cam_02"] and out["cam_11"]["name"] == names[0]
+
+
 def test_unknown_camera_or_too_few_fail(tmp_path, calib):
     fmc = _headless()
     take = _take(tmp_path, "take_3")
